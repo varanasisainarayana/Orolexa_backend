@@ -1,18 +1,17 @@
+import os
 from fastapi import FastAPI, HTTPException, Depends, File, UploadFile
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from dotenv import load_dotenv
 from datetime import datetime
-import os
 import shutil
 import mimetypes
 import google.generativeai as genai
-from typing import Union
+from sqlmodel import Session, select
 
 from . import auth
 from .database import create_db_and_tables, get_session
 from .utils import decode_jwt_token
 from .models import AnalysisHistory, User
-from sqlmodel import Session, select
 
 # Load environment variables
 load_dotenv()
@@ -43,7 +42,7 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(oauth2_
     return int(payload.get("sub"))  # user_id as int
 
 # ------------------------
-# Upload Image (single)
+# Upload Image
 # ------------------------
 @app.post("/upload-image")
 def upload_image(
@@ -67,13 +66,11 @@ def upload_image(
         raise HTTPException(status_code=500, detail=str(e))
 
 # ------------------------
-# Analyze up to 3 images
+# Analyze Image with Gemini
 # ------------------------
-@app.post("/analyze-images")
-async def analyze_images(
-    file1: UploadFile = File(...),   # Required
-    file2: UploadFile = File(None),  # Optional
-    file3: UploadFile = File(None),  # Optional
+@app.post("/analyze-image")
+def analyze_image(
+    file: UploadFile = File(...),
     current_user: int = Depends(get_current_user),
     session: Session = Depends(get_session)
 ):
@@ -83,63 +80,49 @@ async def analyze_images(
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
 
-        # Ensure uploads directory exists
-        uploads_dir = "uploads"
-        os.makedirs(uploads_dir, exist_ok=True)
+        # Save image
+        upload_dir = "uploads"
+        os.makedirs(upload_dir, exist_ok=True)
+        image_path = os.path.join(upload_dir, f"{datetime.utcnow().timestamp()}_{file.filename}")
+        with open(image_path, "wb") as f:
+            f.write(file.file.read())
 
-        files = [f for f in [file1, file2, file3] if f is not None]
-        results = []
+        # Detect MIME type
+        mime_type, _ = mimetypes.guess_type(image_path)
+        if not mime_type:
+            mime_type = "image/jpeg"
 
-        for uploaded in files:
-            # Save file
-            timestamped_name = f"{int(datetime.utcnow().timestamp()*1000)}_{uploaded.filename}"
-            image_path = os.path.join(uploads_dir, timestamped_name)
+        # Read image bytes
+        with open(image_path, "rb") as img_file:
+            image_bytes = img_file.read()
 
-            with open(image_path, "wb") as f:
-                content = await uploaded.read()
-                f.write(content)
+        # Gemini analysis
+        model = genai.GenerativeModel("gemini-1.5-flash")
+        result = model.generate_content(
+            [
+                "You are a dental expert. Analyze this image for dental health, problems, and suggestions in simple terms for a patient. No styling, single paragraph.",
+                {
+                    "mime_type": mime_type,
+                    "data": image_bytes
+                }
+            ]
+        )
 
-            # Detect MIME type
-            mime_type, _ = mimetypes.guess_type(image_path)
-            if not mime_type:
-                mime_type = "image/jpeg"
+        # Save analysis to DB
+        report = AnalysisHistory(
+            user_id=user.id,
+            image_url=image_path,
+            ai_report=result.text
+        )
+        session.add(report)
+        session.commit()
+        session.refresh(report)
 
-            # Read bytes
-            with open(image_path, "rb") as img_f:
-                image_bytes = img_f.read()
-
-            # Gemini analysis
-            prompt = (
-                "You are a dental expert. Analyze this image for dental health, problems, "
-                "and suggestions in simple terms for a patient. No styling, single paragraph."
-            )
-            model = genai.GenerativeModel("gemini-1.5-flash")
-            result = model.generate_content(
-                [
-                    prompt,
-                    {"mime_type": mime_type, "data": image_bytes}
-                ]
-            )
-            analysis_text = result.text if hasattr(result, "text") else str(result)
-
-            # Save analysis to DB
-            report = AnalysisHistory(
-                user_id=user.id,
-                image_url=image_path,
-                ai_report=analysis_text
-            )
-            session.add(report)
-            session.commit()
-            session.refresh(report)
-
-            results.append({
-                "filename": uploaded.filename,
-                "saved_path": image_path,
-                "analysis": analysis_text,
-                "report_id": report.id
-            })
-
-        return {"message": "Dental analysis completed", "results": results}
+        return {
+            "message": "Dental analysis completed",
+            "analysis": result.text,
+            "report_id": report.id
+        }
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -167,3 +150,11 @@ def get_history(
         }
         for r in reports
     ]
+
+# ------------------------
+# Run with correct PORT in local/production
+# ------------------------
+if __name__ == "__main__":
+    import uvicorn
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run("app.main:app", host="0.0.0.0", port=port)
