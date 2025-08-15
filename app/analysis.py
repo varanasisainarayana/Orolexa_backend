@@ -109,6 +109,7 @@ Please provide your analysis in the following format:
 
 **Overall Assessment:**
 [Brief summary of dental health status]
+Also give overall rating of the dental health of the patient out of 5.
 
 **Detailed Findings:**
 - [Specific observations about teeth, gums, and oral health]

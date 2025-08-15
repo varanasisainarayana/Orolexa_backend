@@ -52,35 +52,44 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(oauth2_
     return int(payload.get("sub"))  # user_id as int
 
 # ------------------------
-# Upload Image
+# Upload Images (three inputs, only first required)
 # ------------------------
 @app.post("/upload-image")
 def upload_image(
-    file: UploadFile = File(...),
+    file1: UploadFile = File(...),
+    file2: UploadFile = File(None),
+    file3: UploadFile = File(None),
     current_user: int = Depends(get_current_user)
 ):
     try:
         upload_dir = "uploads"
         os.makedirs(upload_dir, exist_ok=True)
-        file_path = os.path.join(upload_dir, f"{datetime.utcnow().timestamp()}_{file.filename}")
 
-        with open(file_path, "wb") as buffer:
-            shutil.copyfileobj(file.file, buffer)
+        saved_paths = []
+        for f in [file1, file2, file3]:
+            if not f:
+                continue
+            path = os.path.join(upload_dir, f"{datetime.utcnow().timestamp()}_{f.filename}")
+            with open(path, "wb") as buffer:
+                shutil.copyfileobj(f.file, buffer)
+            saved_paths.append(path)
 
         return {
-            "message": "Image uploaded successfully",
-            "file_path": file_path,
+            "message": "Image(s) uploaded successfully",
+            "file_paths": saved_paths,
             "uploaded_by": current_user
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 # ------------------------
-# Analyze Image with Gemini
+# Analyze Images with Gemini (three inputs, only first required)
 # ------------------------
 @app.post("/analyze-image")
 def analyze_image(
-    file: UploadFile = File(...),
+    file1: UploadFile = File(...),
+    file2: UploadFile = File(None),
+    file3: UploadFile = File(None),
     current_user: int = Depends(get_current_user),
     session: Session = Depends(get_session)
 ):
@@ -90,48 +99,111 @@ def analyze_image(
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
 
-        # Save image
-        upload_dir = "uploads"
-        os.makedirs(upload_dir, exist_ok=True)
-        image_path = os.path.join(upload_dir, f"{datetime.utcnow().timestamp()}_{file.filename}")
-        with open(image_path, "wb") as f:
-            f.write(file.file.read())
+        analyses = []
+        saved_paths = []
+        
+        # Process each provided file
+        for i, file in enumerate([file1, file2, file3], 1):
+            if not file:
+                continue
+                
+            # Save image
+            upload_dir = "uploads"
+            os.makedirs(upload_dir, exist_ok=True)
+            image_path = os.path.join(upload_dir, f"{datetime.utcnow().timestamp()}_{file.filename}")
+            with open(image_path, "wb") as f:
+                f.write(file.file.read())
+            saved_paths.append(image_path)
 
-        # Detect MIME type
-        mime_type, _ = mimetypes.guess_type(image_path)
-        if not mime_type:
-            mime_type = "image/jpeg"
+            # Detect MIME type
+            mime_type, _ = mimetypes.guess_type(image_path)
+            if not mime_type:
+                mime_type = "image/jpeg"
 
-        # Read image bytes
-        with open(image_path, "rb") as img_file:
-            image_bytes = img_file.read()
+            # Read image bytes
+            with open(image_path, "rb") as img_file:
+                image_bytes = img_file.read()
 
-        # Gemini analysis
-        model = genai.GenerativeModel("gemini-1.5-flash")
-        result = model.generate_content(
-            [
-                "You are a dental expert. Analyze this image for dental health, problems, and suggestions in simple terms for a patient. No styling, single paragraph.",
-                {
-                    "mime_type": mime_type,
-                    "data": image_bytes
-                }
-            ]
-        )
+            # Gemini analysis
+            model = genai.GenerativeModel("gemini-1.5-flash")
+            result = model.generate_content(
+                [
+                    f"""You are a professional dental AI assistant. Analyze the provided dental image (image {i}) and provide a comprehensive assessment.
 
-        # Save analysis to DB
-        report = AnalysisHistory(
-            user_id=user.id,
-            image_url=image_path,
-            ai_report=result.text
-        )
-        session.add(report)
+**Instructions:**
+1. Examine the image carefully for dental health indicators
+2. Provide a detailed analysis in a professional, medical tone
+3. Focus on both positive aspects and areas of concern
+4. Be specific about tooth locations and conditions
+5. Provide actionable recommendations when appropriate
+
+**Analysis Structure:**
+Please provide your analysis in the following format:
+
+**Overall Assessment:**
+[Brief summary of dental health status]
+Also give overall rating of the dental health of the patient out of 5.
+
+**Detailed Findings:**
+- [Specific observations about teeth, gums, and oral health]
+- [Note any visible issues like cavities, discoloration, gaps, etc.]
+- [Comment on gum health and overall oral hygiene]
+
+**Areas of Concern:**
+- [List any detected issues or potential problems]
+- [Specify severity and urgency if applicable]
+
+**Positive Aspects:**
+- [Highlight good dental health indicators]
+- [Note healthy teeth, gums, or good oral hygiene signs]
+
+**Recommendations:**
+- [Suggest specific actions or lifestyle changes]
+- [Mention if professional dental consultation is recommended]
+- [Provide preventive care advice]
+
+**Important Notes:**
+- If the image quality is poor or unclear, mention this limitation
+- If the image doesn't show teeth clearly, state this clearly
+- Be encouraging but honest about any concerns
+- Use professional medical terminology appropriately
+- Keep the tone helpful and educational
+
+**Response Guidelines:**
+- Keep the total response between 200-400 words
+- Use clear, easy-to-understand language
+- Be specific about tooth locations (e.g., "upper right molar", "lower left incisor")
+- If no teeth are visible, clearly state this
+- Focus on what can be observed from the image
+
+Please analyze the dental image and provide your assessment following these guidelines.""",
+                    {
+                        "mime_type": mime_type,
+                        "data": image_bytes
+                    }
+                ]
+            )
+
+            analyses.append({
+                "image_number": i,
+                "analysis": result.text,
+                "image_path": image_path
+            })
+
+            # Save analysis to DB
+            report = AnalysisHistory(
+                user_id=user.id,
+                image_url=image_path,
+                ai_report=result.text
+            )
+            session.add(report)
+
         session.commit()
-        session.refresh(report)
 
         return {
-            "message": "Dental analysis completed",
-            "analysis": result.text,
-            "report_id": report.id
+            "message": f"Dental analysis completed for {len(analyses)} image(s)",
+            "analyses": analyses,
+            "total_images_analyzed": len(analyses)
         }
 
     except Exception as e:
