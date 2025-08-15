@@ -94,8 +94,56 @@ async def analyze_images(
 
         # Gemini AI
         prompt = (
-            "You are a dental expert. Analyze this image for dental health, problems, "
-            "and suggestions in simple terms for a patient. Provide a single paragraph."
+            """
+You are a professional dental AI assistant. Analyze the provided dental image and provide a comprehensive assessment.
+
+**Instructions:**
+1. Examine the image carefully for dental health indicators
+2. Provide a detailed analysis in a professional, medical tone
+3. Focus on both positive aspects and areas of concern
+4. Be specific about tooth locations and conditions
+5. Provide actionable recommendations when appropriate
+
+**Analysis Structure:**
+Please provide your analysis in the following format:
+
+**Overall Assessment:**
+[Brief summary of dental health status]
+
+**Detailed Findings:**
+- [Specific observations about teeth, gums, and oral health]
+- [Note any visible issues like cavities, discoloration, gaps, etc.]
+- [Comment on gum health and overall oral hygiene]
+
+**Areas of Concern:**
+- [List any detected issues or potential problems]
+- [Specify severity and urgency if applicable]
+
+**Positive Aspects:**
+- [Highlight good dental health indicators]
+- [Note healthy teeth, gums, or good oral hygiene signs]
+
+**Recommendations:**
+- [Suggest specific actions or lifestyle changes]
+- [Mention if professional dental consultation is recommended]
+- [Provide preventive care advice]
+
+**Important Notes:**
+- If the image quality is poor or unclear, mention this limitation
+- If the image doesn't show teeth clearly, state this clearly
+- Be encouraging but honest about any concerns
+- Use professional medical terminology appropriately
+- Keep the tone helpful and educational
+
+**Response Guidelines:**
+- Keep the total response between 200-400 words
+- Use clear, easy-to-understand language
+- Be specific about tooth locations (e.g., "upper right molar", "lower left incisor")
+- If no teeth are visible, clearly state this
+- Focus on what can be observed from the image
+
+Please analyze the dental image and provide your assessment following these guidelines.
+"""
         )
         model = genai.GenerativeModel("gemini-1.5-flash")
         result = model.generate_content(

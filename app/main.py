@@ -1,6 +1,7 @@
 import os
 from fastapi import FastAPI, HTTPException, Depends, File, UploadFile
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 from datetime import datetime
 import shutil
@@ -21,6 +22,15 @@ genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
 
 # Initialize FastAPI
 app = FastAPI(title="Dental AI API")
+
+# Add CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # In production, specify your frontend domain
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # Auth scheme
 oauth2_scheme = HTTPBearer()
@@ -150,6 +160,71 @@ def get_history(
         }
         for r in reports
     ]
+
+# ------------------------
+# Get User Profile
+# ------------------------
+@app.get("/profile")
+def get_profile(
+    current_user: int = Depends(get_current_user),
+    session: Session = Depends(get_session)
+):
+    user = session.exec(select(User).where(User.id == current_user)).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    return {
+        "id": user.id,
+        "full_name": user.full_name,
+        "mobile_number": user.mobile_number,
+        "profile_photo_url": user.profile_photo_url,
+        "created_at": user.created_at.isoformat()
+    }
+
+# ------------------------
+# Update User Profile
+# ------------------------
+@app.put("/profile")
+def update_profile(
+    full_name: str = None,
+    profile_photo: UploadFile = File(None),
+    current_user: int = Depends(get_current_user),
+    session: Session = Depends(get_session)
+):
+    user = session.exec(select(User).where(User.id == current_user)).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    # Update full name if provided
+    if full_name:
+        user.full_name = full_name
+    
+    # Update profile photo if provided
+    if profile_photo:
+        uploads_dir = "uploads/profiles"
+        os.makedirs(uploads_dir, exist_ok=True)
+        ext = os.path.splitext(profile_photo.filename)[1]
+        filename = f"{datetime.utcnow().timestamp()}_{profile_photo.filename}"
+        saved_path = os.path.join(uploads_dir, filename)
+        
+        try:
+            with open(saved_path, "wb") as f:
+                shutil.copyfileobj(profile_photo.file, f)
+            user.profile_photo_url = saved_path
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Could not save profile photo: {e}")
+    
+    session.add(user)
+    session.commit()
+    session.refresh(user)
+    
+    return {
+        "id": user.id,
+        "full_name": user.full_name,
+        "mobile_number": user.mobile_number,
+        "profile_photo_url": user.profile_photo_url,
+        "created_at": user.created_at.isoformat()
+    }
 
 # ------------------------
 # Run with correct PORT in local/production
