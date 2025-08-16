@@ -2,6 +2,7 @@ import os
 from fastapi import FastAPI, HTTPException, Depends, File, UploadFile
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from dotenv import load_dotenv
 from datetime import datetime
 import shutil
@@ -20,6 +21,9 @@ load_dotenv()
 # Configure Gemini API
 genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
 
+# Configure base URL for image serving
+BASE_URL = os.getenv("BASE_URL", "http://localhost:8000")
+
 # Initialize FastAPI
 app = FastAPI(title="Dental AI API")
 
@@ -32,6 +36,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Mount static files for uploaded images
+app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
+
 # Auth scheme
 oauth2_scheme = HTTPBearer()
 
@@ -42,6 +49,15 @@ app.include_router(auth.router)
 @app.on_event("startup")
 def on_startup():
     create_db_and_tables()
+
+# Health check endpoint
+@app.get("/health")
+def health_check():
+    return {
+        "status": "healthy",
+        "service": "Dental AI API",
+        "timestamp": datetime.utcnow().isoformat()
+    }
 
 # Dependency to get current user from JWT
 def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(oauth2_scheme)):
@@ -75,12 +91,19 @@ def upload_image(
             saved_paths.append(path)
 
         return {
-            "message": "Image(s) uploaded successfully",
-            "file_paths": saved_paths,
-            "uploaded_by": current_user
+            "success": True,
+            "data": {
+                "message": "Images uploaded successfully",
+                "file_paths": saved_paths,
+                "uploaded_by": current_user,
+                "total_images": len(saved_paths)
+            }
         }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        return {
+            "success": False,
+            "error": str(e)
+        }
 
 # ------------------------
 # Analyze Images with Gemini (three inputs, only first required)
@@ -99,13 +122,25 @@ def analyze_image(
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
 
-        analyses = []
         saved_paths = []
+        image_data = []
         
         # Process each provided file
         for i, file in enumerate([file1, file2, file3], 1):
             if not file:
                 continue
+            
+            # Validate file type
+            if not file.content_type or not file.content_type.startswith('image/'):
+                raise HTTPException(status_code=415, detail=f"File {i} is not a valid image")
+            
+            # Validate file size (10MB limit)
+            file.file.seek(0, 2)  # Seek to end
+            file_size = file.file.tell()
+            file.file.seek(0)  # Reset to beginning
+            
+            if file_size > 10 * 1024 * 1024:  # 10MB
+                raise HTTPException(status_code=413, detail=f"File {i} is too large (max 10MB)")
                 
             # Save image
             upload_dir = "uploads"
@@ -123,91 +158,108 @@ def analyze_image(
             # Read image bytes
             with open(image_path, "rb") as img_file:
                 image_bytes = img_file.read()
+            
+            image_data.append({
+                "mime_type": mime_type,
+                "data": image_bytes,
+                "path": image_path
+            })
 
-            # Gemini analysis
-            model = genai.GenerativeModel("gemini-1.5-flash")
-            result = model.generate_content(
-                [
-                    f"""You are a professional dental AI assistant. Analyze the provided dental image (image {i}) and provide a comprehensive assessment.
+        # Unified Gemini analysis for all images
+        model = genai.GenerativeModel("gemini-1.5-flash")
+        
+        # Prepare content for analysis
+        content = [
+            f"""You are a professional dental AI assistant. Analyze the provided dental images ({len(image_data)} total) and provide a comprehensive unified assessment.
 
 **Instructions:**
-1. Examine the image carefully for dental health indicators
-2. Provide a detailed analysis in a professional, medical tone
-3. Focus on both positive aspects and areas of concern
-4. Be specific about tooth locations and conditions
-5. Provide actionable recommendations when appropriate
+1. Examine all images together for a complete dental health picture
+2. Provide a unified analysis that considers all angles and views
+3. Use professional, medical tone while being encouraging
+4. Be specific about tooth locations and conditions across all images
+5. Provide actionable recommendations based on the complete assessment
 
 **Analysis Structure:**
 Please provide your analysis in the following format:
 
 **Overall Assessment:**
-[Brief summary of dental health status]
-Also give overall rating of the dental health of the patient out of 5.
+[Comprehensive summary considering all images - mention how many images were analyzed]
+Overall dental health rating out of 5.
 
 **Detailed Findings:**
-- [Specific observations about teeth, gums, and oral health]
+- [Specific observations about teeth, gums, and oral health from all angles]
 - [Note any visible issues like cavities, discoloration, gaps, etc.]
-- [Comment on gum health and overall oral hygiene]
+- [Comment on gum health and overall oral hygiene across all views]
 
 **Areas of Concern:**
-- [List any detected issues or potential problems]
+- [List any detected issues or potential problems from any image]
 - [Specify severity and urgency if applicable]
+- [Mention if issues are visible from multiple angles]
 
 **Positive Aspects:**
-- [Highlight good dental health indicators]
+- [Highlight good dental health indicators from all images]
 - [Note healthy teeth, gums, or good oral hygiene signs]
 
 **Recommendations:**
 - [Suggest specific actions or lifestyle changes]
 - [Mention if professional dental consultation is recommended]
-- [Provide preventive care advice]
+- [Provide preventive care advice based on complete assessment]
 
 **Important Notes:**
-- If the image quality is poor or unclear, mention this limitation
-- If the image doesn't show teeth clearly, state this clearly
+- If any image quality is poor or unclear, mention this limitation
+- If some images don't show teeth clearly, state this clearly
 - Be encouraging but honest about any concerns
 - Use professional medical terminology appropriately
 - Keep the tone helpful and educational
 
 **Response Guidelines:**
-- Keep the total response between 200-400 words
+- Keep the total response between 300-600 words (longer for multiple images)
 - Use clear, easy-to-understand language
 - Be specific about tooth locations (e.g., "upper right molar", "lower left incisor")
-- If no teeth are visible, clearly state this
-- Focus on what can be observed from the image
+- If no teeth are visible in any image, clearly state this
+- Focus on what can be observed from all images combined
 
-Please analyze the dental image and provide your assessment following these guidelines.""",
-                    {
-                        "mime_type": mime_type,
-                        "data": image_bytes
-                    }
-                ]
-            )
-
-            analyses.append({
-                "image_number": i,
-                "analysis": result.text,
-                "image_path": image_path
+Please analyze all {len(image_data)} dental image(s) and provide your unified assessment following these guidelines."""
+        ]
+        
+        # Add all images to the content
+        for i, img in enumerate(image_data, 1):
+            content.append({
+                "mime_type": img["mime_type"],
+                "data": img["data"]
             })
 
-            # Save analysis to DB
-            report = AnalysisHistory(
-                user_id=user.id,
-                image_url=image_path,
-                ai_report=result.text
-            )
-            session.add(report)
+        result = model.generate_content(content)
 
+        # Save unified analysis to DB
+        report = AnalysisHistory(
+            user_id=user.id,
+            image_url=",".join(saved_paths),  # Store all image paths
+            ai_report=result.text
+        )
+        session.add(report)
         session.commit()
 
+        # Generate public URLs for images
+        image_urls = [f"{BASE_URL}/{path}" for path in saved_paths]
+
         return {
-            "message": f"Dental analysis completed for {len(analyses)} image(s)",
-            "analyses": analyses,
-            "total_images_analyzed": len(analyses)
+            "success": True,
+            "data": {
+                "message": f"Unified dental analysis completed for {len(image_data)} image(s)",
+                "analysis": {
+                    "image_paths": image_urls,
+                    "analysis": result.text,
+                    "total_images_analyzed": len(image_data)
+                }
+            }
         }
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        return {
+            "success": False,
+            "error": str(e)
+        }
 
 # ------------------------
 # Get Analysis History
@@ -217,21 +269,35 @@ def get_history(
     current_user: int = Depends(get_current_user),
     session: Session = Depends(get_session)
 ):
-    reports = session.exec(
-        select(AnalysisHistory)
-        .where(AnalysisHistory.user_id == current_user)
-        .order_by(AnalysisHistory.created_at.desc())
-    ).all()
+    try:
+        reports = session.exec(
+            select(AnalysisHistory)
+            .where(AnalysisHistory.user_id == current_user)
+            .order_by(AnalysisHistory.created_at.desc())
+        ).all()
 
-    return [
-        {
-            "id": r.id,
-            "analysis": r.ai_report,
-            "image_path": r.image_url,
-            "timestamp": r.created_at.strftime("%Y-%m-%d %H:%M:%S")
+        history_data = []
+        for r in reports:
+            image_paths = r.image_url.split(",") if "," in r.image_url else [r.image_url]
+            image_urls = [f"{BASE_URL}/{path}" for path in image_paths]
+            
+            history_data.append({
+                "id": r.id,
+                "analysis": r.ai_report,
+                "image_paths": image_urls,
+                "total_images": len(image_paths),
+                "timestamp": r.created_at.strftime("%Y-%m-%d %H:%M:%S")
+            })
+
+        return {
+            "success": True,
+            "data": history_data
         }
-        for r in reports
-    ]
+    except Exception as e:
+        return {
+            "success": False,
+            "error": str(e)
+        }
 
 # ------------------------
 # Get User Profile
