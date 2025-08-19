@@ -6,44 +6,53 @@ from .models import OTPRequest, User
 from .schemas import SendOTPRequest, VerifyOTPRequest
 from .utils import create_jwt_token
 from twilio.rest import Client
+from twilio.http.http_client import TwilioHttpClient
 import os
 import uuid
 import shutil
 from datetime import datetime
 import traceback
 from .config import settings
+import logging
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
 
-# Twilio config (from settings)
-client = Client(settings.TWILIO_ACCOUNT_SID, settings.TWILIO_AUTH_TOKEN)
+# Twilio config (from settings) with timeout
+_twilio_http_client = TwilioHttpClient(timeout=10)
+client = Client(settings.TWILIO_ACCOUNT_SID, settings.TWILIO_AUTH_TOKEN, http_client=_twilio_http_client)
 
+@router.get("/ping")
+def auth_ping():
+    return {"ok": True, "twilio_configured": bool(settings.TWILIO_ACCOUNT_SID and settings.TWILIO_AUTH_TOKEN and settings.TWILIO_VERIFY_SERVICE_SID)}
 
 # -----------------------
 # LOGIN FLOW (only for registered users)
 # -----------------------
 @router.post("/login/send-otp")
 def login_send_otp(payload: SendOTPRequest):
+    # Quick env guard
+    if not (settings.TWILIO_ACCOUNT_SID and settings.TWILIO_AUTH_TOKEN and settings.TWILIO_VERIFY_SERVICE_SID):
+        raise HTTPException(status_code=500, detail="Twilio credentials not configured")
     try:
         with Session(engine) as session:
             user = session.exec(select(User).where(User.mobile_number == payload.mobile_number)).first()
             if not user:
                 raise HTTPException(status_code=404, detail="Mobile number not registered. Please register first.")
-
-        verification = client.verify.services(settings.TWILIO_VERIFY_SERVICE_SID) \
-            .verifications.create(to=payload.mobile_number, channel="sms")
-
+        # Twilio call with timeout
+        verification = client.verify.services(settings.TWILIO_VERIFY_SERVICE_SID).verifications.create(
+            to=payload.mobile_number, channel="sms"
+        )
         # Store OTP request history (masked OTP)
         with Session(engine) as session:
             session.add(OTPRequest(mobile_number=payload.mobile_number, otp_code="***"))
             session.commit()
-
-        return {"message": "OTP sent successfully for login", "status": verification.status}
-
+        return {"message": "OTP sent successfully for login", "status": getattr(verification, "status", "pending")}
     except HTTPException:
         raise
     except Exception as e:
-        traceback.print_exc()
+        logger.exception("Login send OTP error")
         raise HTTPException(status_code=500, detail=f"Login send OTP error: {e}")
 
 
@@ -91,18 +100,19 @@ def register_send_otp(
     full_name: str = Form(...),
     profile_photo: UploadFile = File(...)
 ):
+    # Quick env guard
+    if not (settings.TWILIO_ACCOUNT_SID and settings.TWILIO_AUTH_TOKEN and settings.TWILIO_VERIFY_SERVICE_SID):
+        raise HTTPException(status_code=500, detail="Twilio credentials not configured")
     # Validate file type
     if profile_photo.content_type not in settings.ALLOWED_IMAGE_TYPES:
         raise HTTPException(status_code=415, detail="Invalid file type")
-        
     # Validate file size
     profile_photo.file.seek(0, 2)
     file_size = profile_photo.file.tell()
     profile_photo.file.seek(0)
-    
     if file_size > settings.MAX_FILE_SIZE:
         raise HTTPException(status_code=413, detail="File too large")
-    
+
     uploads_dir = f"{settings.UPLOAD_DIR}/profiles"
     os.makedirs(uploads_dir, exist_ok=True)
     ext = os.path.splitext(profile_photo.filename)[1]
@@ -138,7 +148,7 @@ def register_send_otp(
         session.add(otp_entry)
         session.commit()
 
-    return {"message": "OTP sent successfully for registration", "status": verification.status}
+    return {"message": "OTP sent successfully for registration", "status": getattr(verification, "status", "pending")}
 
 
 @router.post("/register/verify-otp")
