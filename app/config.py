@@ -56,8 +56,8 @@ class Settings(BaseSettings):
     # Base URL for image serving (Railway specific)
     BASE_URL: str = os.environ.get("BASE_URL", "http://localhost:8000")
     
-    # Railway specific settings
-    RAILWAY_ENVIRONMENT: bool = os.environ.get("RAILWAY_ENVIRONMENT", "false").lower() == "true"
+    # Railway specific settings (string to avoid boolean parsing errors)
+    RAILWAY_ENVIRONMENT: str = os.environ.get("RAILWAY_ENVIRONMENT", "")
     
     class Config:
         env_file = ".env"
