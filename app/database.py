@@ -7,10 +7,12 @@ engine = create_engine(settings.DATABASE_URL, echo=settings.DEBUG)
 
 def create_db_and_tables():
     SQLModel.metadata.create_all(engine)
-    migrate_database()
+    # Only run the lightweight migration helper for SQLite
+    if settings.DATABASE_URL.startswith("sqlite"):
+        migrate_database()
 
 def migrate_database():
-    """Add new columns to existing tables if they don't exist"""
+    """Add new columns to existing tables if they don't exist (SQLite only)."""
     # Extract database path from DATABASE_URL
     if settings.DATABASE_URL.startswith('sqlite:///'):
         db_path = settings.DATABASE_URL.replace('sqlite:///', '')
