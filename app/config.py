@@ -19,9 +19,9 @@ class Settings(BaseSettings):
     DATABASE_URL: str = os.environ.get("DATABASE_URL", "sqlite:///./app/orolexa.db")
     
     # Security Settings
-    SECRET_KEY: str = os.environ.get("JWT_SECRET_KEY", "your-secret-key-change-in-production")
+    SECRET_KEY: str = os.environ.get("JWT_SECRET_KEY", "change-me-in-prod")
     ALGORITHM: str = "HS256"
-    ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 60
     
     # CORS Settings (Railway specific)
     ALLOWED_ORIGINS: List[str] = ["*"]  # Update with your frontend domain
@@ -58,6 +58,11 @@ class Settings(BaseSettings):
     
     # Railway specific settings (string to avoid boolean parsing errors)
     RAILWAY_ENVIRONMENT: str = os.environ.get("RAILWAY_ENVIRONMENT", "")
+
+    # Optional AWS S3 Storage
+    AWS_S3_BUCKET: Optional[str] = os.environ.get("AWS_S3_BUCKET")
+    AWS_REGION: Optional[str] = os.environ.get("AWS_REGION")
+    AWS_S3_BASE_URL: Optional[str] = os.environ.get("AWS_S3_BASE_URL")
     
     class Config:
         env_file = ".env"

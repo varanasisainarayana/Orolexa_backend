@@ -15,6 +15,7 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from .database import get_session
 from .models import AnalysisHistory, User
 from .config import settings
+from .storage import get_storage
 
 # Configure Gemini API from env (make sure GEMINI_API_KEY is set)
 genai.configure(api_key=settings.GEMINI_API_KEY)
@@ -34,57 +35,41 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(oauth2_
 
 def _extract_text_from_gemini_result(result) -> str:
     """Safely extract text from different Gemini result shapes."""
-    # Preferred property
     if getattr(result, "text", None):
         return result.text
-    # fallback to candidates
     try:
         if getattr(result, "candidates", None):
             cand = result.candidates[0]
-            # some SDKs put text under 'content' -> 'parts'
             if getattr(cand, "content", None):
                 parts = getattr(cand.content, "parts", None)
                 if parts:
-                    # parts may be list of strings or objects
                     if isinstance(parts[0], str):
                         return parts[0]
-                    # try nested attribute
                     return getattr(parts[0], "text", str(parts[0]))
             return getattr(cand, "text", str(cand))
     except Exception:
         pass
-    # last resort
     return str(result)
 
-def create_thumbnail(image_path: str, thumbnail_size: tuple = None) -> str:
-    """Create a thumbnail from the original image."""
+def create_thumbnail(image_path_or_url: str, local_source_path: str = None, thumbnail_size: tuple = None) -> str:
+    """Create a thumbnail from a local image file and store via StorageService.
+    If using S3, caller should pass a local_source_path for reading bytes.
+    Returns a URL or local path depending on storage backend.
+    """
     if thumbnail_size is None:
         thumbnail_size = settings.THUMBNAIL_SIZE
-        
     try:
-        # Create thumbnails directory
-        thumbnails_dir = f"{settings.UPLOAD_DIR}/thumbnails"
-        os.makedirs(thumbnails_dir, exist_ok=True)
-        
-        # Open and resize image
-        with Image.open(image_path) as img:
-            # Convert to RGB if necessary
+        storage = get_storage()
+        # We must read from local file, so ensure path is available
+        src_path = local_source_path or image_path_or_url
+        with Image.open(src_path) as img:
             if img.mode in ('RGBA', 'LA', 'P'):
                 img = img.convert('RGB')
-            
-            # Create thumbnail
             img.thumbnail(thumbnail_size, Image.Resampling.LANCZOS)
-            
-            # Generate thumbnail filename
-            filename = os.path.basename(image_path)
-            name, ext = os.path.splitext(filename)
-            thumbnail_filename = f"thumb_{name}{ext}"
-            thumbnail_path = os.path.join(thumbnails_dir, thumbnail_filename)
-            
-            # Save thumbnail
-            img.save(thumbnail_path, quality=85, optimize=True)
-            
-            return thumbnail_path
+            buf = io.BytesIO()
+            img.save(buf, format='JPEG', quality=85, optimize=True)
+            buf.seek(0)
+            return storage.save_bytes("thumbnails", os.path.basename(src_path), buf.read())
     except Exception as e:
         print(f"Error creating thumbnail: {e}")
         return None
@@ -98,58 +83,48 @@ async def analyze_images(
     current_user: Union[int, str] = Depends(get_current_user),
     session: Session = Depends(get_session)
 ):
-    """
-    Accept exactly 3 file inputs from the frontend, with file1 required.
-    file2 and file3 are optional.
-    """
-    # Collect only provided files
     files = [f for f in [file1, file2, file3] if f is not None]
-
     if not files:
         raise HTTPException(status_code=400, detail="At least one file must be uploaded.")
-
-    uploads_dir = settings.UPLOAD_DIR
-    os.makedirs(uploads_dir, exist_ok=True)
 
     # Resolve user
     try:
         user = session.exec(select(User).where(User.id == int(current_user))).first()
     except ValueError:
         user = session.exec(select(User).where(User.mobile_number == current_user)).first()
-
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
 
+    storage = get_storage()
     results = []
 
     for uploaded in files:
         # Validate file type
         if uploaded.content_type not in settings.ALLOWED_IMAGE_TYPES:
             raise HTTPException(status_code=415, detail=f"File type {uploaded.content_type} not allowed")
-        
         # Validate file size
         uploaded.file.seek(0, 2)
         file_size = uploaded.file.tell()
         uploaded.file.seek(0)
-        
         if file_size > settings.MAX_FILE_SIZE:
             raise HTTPException(status_code=413, detail=f"File too large (max {settings.MAX_FILE_SIZE // (1024*1024)}MB)")
-        
-        # Save file
-        timestamped_name = f"{int(datetime.utcnow().timestamp()*1000)}_{uploaded.filename}"
-        image_path = os.path.join(uploads_dir, timestamped_name)
 
-        with open(image_path, "wb") as f:
+        # Save file using storage service (also keep local temp path for thumbnail)
+        tmp_dir = settings.UPLOAD_DIR
+        os.makedirs(tmp_dir, exist_ok=True)
+        local_tmp_path = os.path.join(tmp_dir, f"{int(datetime.utcnow().timestamp()*1000)}_{uploaded.filename}")
+        with open(local_tmp_path, "wb") as f:
             content = await uploaded.read()
             f.write(content)
+        saved_url_or_path = storage.save_bytes("", uploaded.filename, content)
 
         # Detect MIME type
-        mime_type, _ = mimetypes.guess_type(image_path)
+        mime_type, _ = mimetypes.guess_type(local_tmp_path)
         if not mime_type:
             mime_type = "image/jpeg"
 
         # Read bytes
-        with open(image_path, "rb") as img_f:
+        with open(local_tmp_path, "rb") as img_f:
             image_bytes = img_f.read()
 
         # Gemini AI
@@ -207,25 +182,23 @@ Please analyze the dental image and provide your assessment following these guid
 """
         )
         model = genai.GenerativeModel(settings.GEMINI_MODEL)
-        result = model.generate_content(
-            [
-                prompt,
-                {"mime_type": mime_type, "data": image_bytes}
-            ]
-        )
+        result = model.generate_content([
+            prompt,
+            {"mime_type": mime_type, "data": image_bytes}
+        ])
         analysis_text = result.text if hasattr(result, "text") else str(result)
 
-        # Create thumbnail
-        thumbnail_path = create_thumbnail(image_path)
-        
-        # Save to DB with new fields
+        # Create thumbnail and save via storage
+        thumbnail_url_or_path = create_thumbnail(saved_url_or_path, local_source_path=local_tmp_path)
+
+        # Save to DB
         history_entry = AnalysisHistory(
             user_id=user.id,
-            image_url=image_path,
+            image_url=saved_url_or_path,
             ai_report=analysis_text,
             doctor_name="Dr. AI Assistant",
             status="completed",
-            thumbnail_url=thumbnail_path
+            thumbnail_url=thumbnail_url_or_path
         )
         session.add(history_entry)
         session.commit()
@@ -233,12 +206,12 @@ Please analyze the dental image and provide your assessment following these guid
 
         # Get base URL for image serving
         BASE_URL = settings.BASE_URL
-        
+
         results.append({
             "filename": uploaded.filename,
-            "saved_path": image_path,
-            "image_url": f"{BASE_URL}/{image_path}",
-            "thumbnail_url": f"{BASE_URL}/{thumbnail_path}" if thumbnail_path else None,
+            "saved_path": saved_url_or_path,
+            "image_url": saved_url_or_path if saved_url_or_path.startswith("http") else f"{BASE_URL}/{saved_url_or_path}",
+            "thumbnail_url": thumbnail_url_or_path if (thumbnail_url_or_path and thumbnail_url_or_path.startswith("http")) else (f"{BASE_URL}/{thumbnail_url_or_path}" if thumbnail_url_or_path else None),
             "analysis": analysis_text,
             "history_id": history_entry.id,
             "doctor_name": "Dr. AI Assistant",
@@ -260,48 +233,34 @@ def get_history(
     current_user: Union[int, str] = Depends(get_current_user),
     session: Session = Depends(get_session)
 ):
-    """
-    Return list of past analyses for the current user (newest first).
-    """
     try:
-        # Resolve user like above
         user = None
         try:
             user_id_candidate = int(current_user)
             user = session.exec(select(User).where(User.id == user_id_candidate)).first()
         except Exception:
             user = session.exec(select(User).where(User.mobile_number == current_user)).first()
-
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
-
         histories = session.exec(
             select(AnalysisHistory)
             .where(AnalysisHistory.user_id == user.id)
             .order_by(AnalysisHistory.created_at.desc())
         ).all()
-
-        # Get base URL for image serving
         BASE_URL = settings.BASE_URL
-        
         history_data = [
             {
                 "id": h.id,
                 "analysis": h.ai_report,
-                "image_url": f"{BASE_URL}/{h.image_url}",
-                "thumbnail_url": f"{BASE_URL}/{h.thumbnail_url}" if h.thumbnail_url else None,
+                "image_url": h.image_url if h.image_url.startswith("http") else f"{BASE_URL}/{h.image_url}",
+                "thumbnail_url": h.thumbnail_url if (h.thumbnail_url and h.thumbnail_url.startswith("http")) else (f"{BASE_URL}/{h.thumbnail_url}" if h.thumbnail_url else None),
                 "doctor_name": h.doctor_name,
                 "status": h.status,
                 "timestamp": h.created_at.strftime("%Y-%m-%d %H:%M:%S")
             }
             for h in histories
         ]
-
-        return {
-            "success": True,
-            "data": history_data
-        }
-
+        return {"success": True, "data": history_data}
     except HTTPException:
         raise
     except Exception as e:
