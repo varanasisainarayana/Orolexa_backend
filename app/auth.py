@@ -6,22 +6,17 @@ from .models import OTPRequest, User
 from .schemas import SendOTPRequest, VerifyOTPRequest
 from .utils import create_jwt_token
 from twilio.rest import Client
-from dotenv import load_dotenv
 import os
 import uuid
 import shutil
 from datetime import datetime
 import traceback
-
-load_dotenv()
+from .config import settings
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
 
-# Twilio config (from .env)
-TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID")
-TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
-TWILIO_VERIFY_SERVICE_SID = os.getenv("TWILIO_VERIFY_SERVICE_SID")
-client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+# Twilio config (from settings)
+client = Client(settings.TWILIO_ACCOUNT_SID, settings.TWILIO_AUTH_TOKEN)
 
 
 # -----------------------
@@ -35,7 +30,7 @@ def login_send_otp(payload: SendOTPRequest):
             if not user:
                 raise HTTPException(status_code=404, detail="Mobile number not registered. Please register first.")
 
-        verification = client.verify.services(TWILIO_VERIFY_SERVICE_SID) \
+        verification = client.verify.services(settings.TWILIO_VERIFY_SERVICE_SID) \
             .verifications.create(to=payload.mobile_number, channel="sms")
 
         # Store OTP request history (masked OTP)
@@ -55,7 +50,7 @@ def login_send_otp(payload: SendOTPRequest):
 @router.post("/login/verify-otp")
 def login_verify_otp(payload: VerifyOTPRequest):
     try:
-        verification_check = client.verify.services(TWILIO_VERIFY_SERVICE_SID) \
+        verification_check = client.verify.services(settings.TWILIO_VERIFY_SERVICE_SID) \
             .verification_checks.create(to=payload.mobile_number, code=payload.otp_code)
     except Exception as e:
         traceback.print_exc()
@@ -96,7 +91,19 @@ def register_send_otp(
     full_name: str = Form(...),
     profile_photo: UploadFile = File(...)
 ):
-    uploads_dir = "uploads/profiles"
+    # Validate file type
+    if profile_photo.content_type not in settings.ALLOWED_IMAGE_TYPES:
+        raise HTTPException(status_code=415, detail="Invalid file type")
+        
+    # Validate file size
+    profile_photo.file.seek(0, 2)
+    file_size = profile_photo.file.tell()
+    profile_photo.file.seek(0)
+    
+    if file_size > settings.MAX_FILE_SIZE:
+        raise HTTPException(status_code=413, detail="File too large")
+    
+    uploads_dir = f"{settings.UPLOAD_DIR}/profiles"
     os.makedirs(uploads_dir, exist_ok=True)
     ext = os.path.splitext(profile_photo.filename)[1]
     filename = f"{uuid.uuid4().hex}{ext}"
@@ -110,7 +117,7 @@ def register_send_otp(
         raise HTTPException(status_code=500, detail=f"Could not save profile photo: {e}")
 
     try:
-        verification = client.verify.services(TWILIO_VERIFY_SERVICE_SID) \
+        verification = client.verify.services(settings.TWILIO_VERIFY_SERVICE_SID) \
             .verifications.create(to=mobile_number, channel="sms")
     except Exception as e:
         traceback.print_exc()
@@ -137,7 +144,7 @@ def register_send_otp(
 @router.post("/register/verify-otp")
 def register_verify_otp(payload: VerifyOTPRequest):
     try:
-        verification_check = client.verify.services(TWILIO_VERIFY_SERVICE_SID) \
+        verification_check = client.verify.services(settings.TWILIO_VERIFY_SERVICE_SID) \
             .verification_checks.create(to=payload.mobile_number, code=payload.otp_code)
     except Exception as e:
         traceback.print_exc()

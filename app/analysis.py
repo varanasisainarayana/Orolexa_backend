@@ -7,15 +7,30 @@ import os
 import google.generativeai as genai
 from datetime import datetime
 import traceback
+from PIL import Image
+import io
 
-from .auth import get_current_user
+from .utils import decode_jwt_token
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from .database import get_session
 from .models import AnalysisHistory, User
+from .config import settings
 
 # Configure Gemini API from env (make sure GEMINI_API_KEY is set)
-genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
+genai.configure(api_key=settings.GEMINI_API_KEY)
 
 router = APIRouter(prefix="/analysis", tags=["Analysis"])
+
+# Auth scheme
+oauth2_scheme = HTTPBearer()
+
+# Dependency to get current user from JWT
+def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(oauth2_scheme)):
+    token = credentials.credentials
+    payload = decode_jwt_token(token)
+    if not payload:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    return int(payload.get("sub"))  # user_id as int
 
 def _extract_text_from_gemini_result(result) -> str:
     """Safely extract text from different Gemini result shapes."""
@@ -41,6 +56,39 @@ def _extract_text_from_gemini_result(result) -> str:
     # last resort
     return str(result)
 
+def create_thumbnail(image_path: str, thumbnail_size: tuple = None) -> str:
+    """Create a thumbnail from the original image."""
+    if thumbnail_size is None:
+        thumbnail_size = settings.THUMBNAIL_SIZE
+        
+    try:
+        # Create thumbnails directory
+        thumbnails_dir = f"{settings.UPLOAD_DIR}/thumbnails"
+        os.makedirs(thumbnails_dir, exist_ok=True)
+        
+        # Open and resize image
+        with Image.open(image_path) as img:
+            # Convert to RGB if necessary
+            if img.mode in ('RGBA', 'LA', 'P'):
+                img = img.convert('RGB')
+            
+            # Create thumbnail
+            img.thumbnail(thumbnail_size, Image.Resampling.LANCZOS)
+            
+            # Generate thumbnail filename
+            filename = os.path.basename(image_path)
+            name, ext = os.path.splitext(filename)
+            thumbnail_filename = f"thumb_{name}{ext}"
+            thumbnail_path = os.path.join(thumbnails_dir, thumbnail_filename)
+            
+            # Save thumbnail
+            img.save(thumbnail_path, quality=85, optimize=True)
+            
+            return thumbnail_path
+    except Exception as e:
+        print(f"Error creating thumbnail: {e}")
+        return None
+
 
 @router.post("/analyze-images")
 async def analyze_images(
@@ -60,7 +108,7 @@ async def analyze_images(
     if not files:
         raise HTTPException(status_code=400, detail="At least one file must be uploaded.")
 
-    uploads_dir = "uploads"
+    uploads_dir = settings.UPLOAD_DIR
     os.makedirs(uploads_dir, exist_ok=True)
 
     # Resolve user
@@ -75,6 +123,18 @@ async def analyze_images(
     results = []
 
     for uploaded in files:
+        # Validate file type
+        if uploaded.content_type not in settings.ALLOWED_IMAGE_TYPES:
+            raise HTTPException(status_code=415, detail=f"File type {uploaded.content_type} not allowed")
+        
+        # Validate file size
+        uploaded.file.seek(0, 2)
+        file_size = uploaded.file.tell()
+        uploaded.file.seek(0)
+        
+        if file_size > settings.MAX_FILE_SIZE:
+            raise HTTPException(status_code=413, detail=f"File too large (max {settings.MAX_FILE_SIZE // (1024*1024)}MB)")
+        
         # Save file
         timestamped_name = f"{int(datetime.utcnow().timestamp()*1000)}_{uploaded.filename}"
         image_path = os.path.join(uploads_dir, timestamped_name)
@@ -146,7 +206,7 @@ Also give overall rating of the dental health of the patient out of 5.
 Please analyze the dental image and provide your assessment following these guidelines.
 """
         )
-        model = genai.GenerativeModel("gemini-1.5-flash")
+        model = genai.GenerativeModel(settings.GEMINI_MODEL)
         result = model.generate_content(
             [
                 prompt,
@@ -155,24 +215,44 @@ Please analyze the dental image and provide your assessment following these guid
         )
         analysis_text = result.text if hasattr(result, "text") else str(result)
 
-        # Save to DB
+        # Create thumbnail
+        thumbnail_path = create_thumbnail(image_path)
+        
+        # Save to DB with new fields
         history_entry = AnalysisHistory(
             user_id=user.id,
             image_url=image_path,
-            ai_report=analysis_text
+            ai_report=analysis_text,
+            doctor_name="Dr. AI Assistant",
+            status="completed",
+            thumbnail_url=thumbnail_path
         )
         session.add(history_entry)
         session.commit()
         session.refresh(history_entry)
 
+        # Get base URL for image serving
+        BASE_URL = settings.BASE_URL
+        
         results.append({
             "filename": uploaded.filename,
             "saved_path": image_path,
+            "image_url": f"{BASE_URL}/{image_path}",
+            "thumbnail_url": f"{BASE_URL}/{thumbnail_path}" if thumbnail_path else None,
             "analysis": analysis_text,
-            "history_id": history_entry.id
+            "history_id": history_entry.id,
+            "doctor_name": "Dr. AI Assistant",
+            "status": "completed",
+            "created_at": history_entry.created_at.strftime("%Y-%m-%d %H:%M:%S")
         })
 
-    return {"message": "Analysis completed", "results": results}
+    return {
+        "success": True,
+        "data": {
+            "message": "Analysis completed",
+            "results": results
+        }
+    }
 
 
 @router.get("/history")
@@ -201,15 +281,26 @@ def get_history(
             .order_by(AnalysisHistory.created_at.desc())
         ).all()
 
-        return [
+        # Get base URL for image serving
+        BASE_URL = settings.BASE_URL
+        
+        history_data = [
             {
                 "id": h.id,
                 "analysis": h.ai_report,
-                "image_url": h.image_url,
+                "image_url": f"{BASE_URL}/{h.image_url}",
+                "thumbnail_url": f"{BASE_URL}/{h.thumbnail_url}" if h.thumbnail_url else None,
+                "doctor_name": h.doctor_name,
+                "status": h.status,
                 "timestamp": h.created_at.strftime("%Y-%m-%d %H:%M:%S")
             }
             for h in histories
         ]
+
+        return {
+            "success": True,
+            "data": history_data
+        }
 
     except HTTPException:
         raise

@@ -3,6 +3,7 @@ import jwt
 import random
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
+from .config import settings
 
 # Load environment variables
 load_dotenv()
@@ -23,20 +24,20 @@ def generate_otp() -> str:
 # =========================
 # JWT Token Handling
 # =========================
-def create_jwt_token(data: dict) -> str:
-    """Create a JWT token with expiry."""
+def create_jwt_token(data: dict):
+    """Create JWT token with expiration"""
     to_encode = data.copy()
-    expire = datetime.utcnow() + timedelta(minutes=JWT_EXPIRY_MINUTES)
+    expire = datetime.utcnow() + timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
     to_encode.update({"exp": expire})
-    return jwt.encode(to_encode, JWT_SECRET_KEY, algorithm=JWT_ALGORITHM)
+    encoded_jwt = jwt.encode(to_encode, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
+    return encoded_jwt
 
-
-def decode_jwt_token(token: str) -> dict | None:
-    """Decode JWT token and return payload, or None if invalid/expired."""
+def decode_jwt_token(token: str):
+    """Decode and verify JWT token"""
     try:
-        payload = jwt.decode(token, JWT_SECRET_KEY, algorithms=[JWT_ALGORITHM])
+        payload = jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
         return payload
     except jwt.ExpiredSignatureError:
         return None
-    except jwt.InvalidTokenError:
+    except jwt.JWTError:
         return None

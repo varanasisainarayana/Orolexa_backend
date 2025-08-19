@@ -28,6 +28,9 @@ class AnalysisHistory(SQLModel, table=True):
     user_id: int = Field(foreign_key="user.id")
     image_url: str
     ai_report: str
+    doctor_name: Optional[str] = Field(default="Dr. AI Assistant")
+    status: str = Field(default="completed")  # pending, completed, failed
+    thumbnail_url: Optional[str] = None
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
     user: Optional[User] = Relationship(back_populates="histories")
