@@ -65,8 +65,9 @@ class LoggingMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         start_time = time.time()
         
-        # Log request
-        logger.info(f"Request: {request.method} {request.url.path} from {request.client.host}")
+        # Log request (guard against missing client info)
+        client_host = request.client.host if request.client else "unknown"
+        logger.info(f"Request: {request.method} {request.url.path} from {client_host}")
         
         # Process request
         response = await call_next(request)

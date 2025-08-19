@@ -2,8 +2,27 @@ from sqlmodel import SQLModel, create_engine, Session
 import os
 import sqlite3
 from .config import settings
+from sqlalchemy.engine import URL
 
-engine = create_engine(settings.DATABASE_URL, echo=settings.DEBUG)
+# Choose engine options based on database scheme
+db_url = settings.DATABASE_URL
+engine_kwargs = {}
+
+if db_url.startswith("sqlite"):
+    # SQLite specific connect args
+    engine_kwargs.update({
+        "connect_args": {"check_same_thread": False}
+    })
+else:
+    # Better resiliency for managed Postgres
+    engine_kwargs.update({
+        "pool_pre_ping": True,
+        "pool_recycle": 300,
+        "pool_size": 5,
+        "max_overflow": 10,
+    })
+
+engine = create_engine(db_url, echo=settings.DEBUG, **engine_kwargs)
 
 def create_db_and_tables():
     SQLModel.metadata.create_all(engine)

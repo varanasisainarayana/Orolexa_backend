@@ -37,8 +37,16 @@ genai.configure(api_key=settings.GEMINI_API_KEY)
 async def lifespan(app: FastAPI):
     # Startup
     logger.info("Starting Dental AI API...")
-    create_db_and_tables()
-    logger.info("Database initialized successfully")
+    app.state.db_init_ok = True
+    app.state.db_init_error = None
+    try:
+        create_db_and_tables()
+        logger.info("Database initialized successfully")
+    except Exception as e:
+        # Do not crash the app; report via health endpoint
+        app.state.db_init_ok = False
+        app.state.db_init_error = str(e)
+        logger.exception("Database initialization failed")
     yield
     # Shutdown
     logger.info("Shutting down Dental AI API...")
@@ -83,12 +91,16 @@ app.include_router(analysis.router)
 @app.get("/health")
 def health_check():
     return {
-        "status": "healthy",
+        "status": "healthy" if getattr(app.state, "db_init_ok", True) else "degraded",
         "service": settings.APP_NAME,
         "version": settings.APP_VERSION,
         "timestamp": datetime.utcnow().isoformat(),
         "environment": "railway" if settings.RAILWAY_ENVIRONMENT else "local",
-        "port": settings.PORT
+        "port": settings.PORT,
+        "database": {
+            "ok": getattr(app.state, "db_init_ok", True),
+            "error": getattr(app.state, "db_init_error", None)
+        }
     }
 
 # Dependency to get current user from JWT
