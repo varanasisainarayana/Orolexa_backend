@@ -27,11 +27,15 @@ genai.configure(api_key=settings.GEMINI_API_KEY)
 router = APIRouter(prefix="/analysis", tags=["Analysis"])
 
 # Auth scheme
-oauth2_scheme = HTTPBearer()
+oauth2_scheme = HTTPBearer(auto_error=False)
 
 # Dependency to get current user from JWT
-def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(oauth2_scheme)):
-    token = credentials.credentials
+def get_current_user(request, credentials: HTTPAuthorizationCredentials = Depends(oauth2_scheme)):
+    token = None
+    if credentials and credentials.credentials:
+        token = credentials.credentials
+    else:
+        token = request.cookies.get("access_token")
     payload = decode_jwt_token(token)
     if not payload:
         logger.warning("JWT token decode failed - invalid or expired token")

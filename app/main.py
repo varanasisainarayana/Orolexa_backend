@@ -2,6 +2,7 @@ import os
 from fastapi import FastAPI, HTTPException, Depends, File, UploadFile, Request
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.middleware.gzip import GZipMiddleware
 from fastapi.staticfiles import StaticFiles
 from contextlib import asynccontextmanager
 from datetime import datetime
@@ -57,7 +58,10 @@ app = FastAPI(
     title=settings.APP_NAME,
     version=settings.APP_VERSION,
     debug=settings.DEBUG,
-    lifespan=lifespan
+    lifespan=lifespan,
+    docs_url=("/docs" if settings.DOCS_ENABLED else None),
+    redoc_url=("/redoc" if settings.DOCS_ENABLED else None),
+    openapi_url=("/openapi.json" if settings.DOCS_ENABLED else None)
 )
 
 # Add custom exception handler
@@ -69,11 +73,14 @@ app.add_middleware(LoggingMiddleware)
 app.add_middleware(SecurityMiddleware)
 app.add_middleware(RateLimitMiddleware)
 
+# GZip compression
+app.add_middleware(GZipMiddleware, minimum_size=settings.GZIP_MIN_SIZE)
+
 # Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.ALLOWED_ORIGINS,
-    allow_credentials=True,
+    allow_credentials=settings.CORS_ALLOW_CREDENTIALS,
     allow_methods=settings.ALLOWED_METHODS,
     allow_headers=settings.ALLOWED_HEADERS,
 )
@@ -82,7 +89,7 @@ app.add_middleware(
 app.mount("/uploads", StaticFiles(directory=settings.UPLOAD_DIR), name="uploads")
 
 # Auth scheme
-oauth2_scheme = HTTPBearer()
+oauth2_scheme = HTTPBearer(auto_error=False)
 
 # Include authentication router
 app.include_router(auth.router)
@@ -126,8 +133,15 @@ def health_check():
     }
 
 # Dependency to get current user from JWT
-def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(oauth2_scheme)):
-    token = credentials.credentials
+def get_current_user(request: Request, credentials: HTTPAuthorizationCredentials = Depends(oauth2_scheme)):
+    token = None
+    if credentials and credentials.credentials:
+        token = credentials.credentials
+    else:
+        # Fallback to cookie
+        token = request.cookies.get("access_token")
+    if not token:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
     logger.info(f"Processing JWT token for authentication")
     payload = decode_jwt_token(token)
     if not payload:

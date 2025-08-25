@@ -1,5 +1,5 @@
 # app/auth.py
-from fastapi import APIRouter, HTTPException, UploadFile, File, Form
+from fastapi import APIRouter, HTTPException, UploadFile, File, Form, Response
 from sqlmodel import Session, select
 from .database import engine
 from .models import OTPRequest, User
@@ -64,7 +64,7 @@ def login_send_otp(payload: SendOTPRequest):
 
 
 @router.post("/login/verify-otp")
-def login_verify_otp(payload: VerifyOTPRequest):
+def login_verify_otp(payload: VerifyOTPRequest, response: Response):
     try:
         verification_check = client.verify.services(settings.TWILIO_VERIFY_SERVICE_SID) \
             .verification_checks.create(to=payload.mobile_number, code=payload.otp_code)
@@ -94,6 +94,20 @@ def login_verify_otp(payload: VerifyOTPRequest):
 
         session.refresh(user)
         token = create_jwt_token({"sub": str(user.id)})
+
+        # Set HttpOnly cookie for automatic auth
+        cookie_secure = not settings.DEBUG
+        max_age = settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60
+        response.set_cookie(
+            key="access_token",
+            value=token,
+            httponly=True,
+            secure=cookie_secure,
+            samesite="lax",
+            max_age=max_age,
+            expires=max_age,
+            path="/"
+        )
 
         return {
             "success": True,
@@ -185,7 +199,7 @@ def register_send_otp(
 
 
 @router.post("/register/verify-otp")
-def register_verify_otp(payload: VerifyOTPRequest):
+def register_verify_otp(payload: VerifyOTPRequest, response: Response):
     try:
         verification_check = client.verify.services(settings.TWILIO_VERIFY_SERVICE_SID) \
             .verification_checks.create(to=payload.mobile_number, code=payload.otp_code)
@@ -221,6 +235,21 @@ def register_verify_otp(payload: VerifyOTPRequest):
         session.refresh(user)
 
         token = create_jwt_token({"sub": str(user.id)})
+
+        # Set HttpOnly cookie for automatic auth
+        cookie_secure = not settings.DEBUG
+        max_age = settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60
+        response.set_cookie(
+            key="access_token",
+            value=token,
+            httponly=True,
+            secure=cookie_secure,
+            samesite="lax",
+            max_age=max_age,
+            expires=max_age,
+            path="/"
+        )
+
         return {
             "success": True,
             "data": {
