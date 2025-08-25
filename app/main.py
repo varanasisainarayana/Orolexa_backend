@@ -169,7 +169,7 @@ def get_current_user(request: Request, credentials: HTTPAuthorizationCredentials
 # ------------------------
 @app.post("/upload-image")
 def upload_image(
-    file1: UploadFile = File(...),
+    file1: UploadFile = File(None),
     file2: UploadFile = File(None),
     file3: UploadFile = File(None),
     current_user: int = Depends(get_current_user)
@@ -178,8 +178,12 @@ def upload_image(
         upload_dir = settings.UPLOAD_DIR
         os.makedirs(upload_dir, exist_ok=True)
 
+        files = [f for f in [file1, file2, file3] if f is not None]
+        if not files:
+            raise HTTPException(status_code=400, detail="At least one file must be uploaded.")
+
         saved_paths = []
-        for f in [file1, file2, file3]:
+        for f in files:
             if not f:
                 continue
                 

@@ -1,6 +1,6 @@
 # app/analysis.py
 from typing import List, Union
-from fastapi import APIRouter, File, UploadFile, Depends, HTTPException
+from fastapi import APIRouter, File, UploadFile, Depends, HTTPException, Request
 from sqlmodel import Session, select
 import mimetypes
 import os
@@ -30,7 +30,7 @@ router = APIRouter(prefix="/analysis", tags=["Analysis"])
 oauth2_scheme = HTTPBearer(auto_error=False)
 
 # Dependency to get current user from JWT
-def get_current_user(request, credentials: HTTPAuthorizationCredentials = Depends(oauth2_scheme)):
+def get_current_user(request: Request, credentials: HTTPAuthorizationCredentials = Depends(oauth2_scheme)):
     token = None
     if credentials and credentials.credentials:
         token = credentials.credentials
