@@ -1,6 +1,7 @@
 #config.py
 import os
 from pydantic_settings import BaseSettings
+from pydantic import Field
 from typing import Optional, List
 from functools import lru_cache
 
@@ -19,7 +20,7 @@ class Settings(BaseSettings):
     DATABASE_URL: str = os.environ.get("DATABASE_URL", "sqlite:///./app/orolexa.db")
     
     # Security Settings
-    SECRET_KEY: str = os.environ.get("JWT_SECRET_KEY", "change-me-in-prod")
+    SECRET_KEY: str = Field(default="change-me-in-prod", alias="JWT_SECRET_KEY")
     ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60
     
@@ -67,6 +68,7 @@ class Settings(BaseSettings):
     class Config:
         env_file = ".env"
         case_sensitive = True
+        extra = "allow"  # Allow extra fields from environment variables
 
 @lru_cache()
 def get_settings() -> Settings:

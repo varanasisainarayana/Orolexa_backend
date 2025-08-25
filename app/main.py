@@ -1,5 +1,5 @@
 import os
-from fastapi import FastAPI, HTTPException, Depends, File, UploadFile
+from fastapi import FastAPI, HTTPException, Depends, File, UploadFile, Request
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -22,6 +22,7 @@ from .middleware import (
     LoggingMiddleware, 
     ErrorHandlingMiddleware
 )
+from .exceptions import http_exception_handler
 
 # Configure logging
 logging.basicConfig(
@@ -59,6 +60,9 @@ app = FastAPI(
     lifespan=lifespan
 )
 
+# Add custom exception handler
+app.add_exception_handler(HTTPException, http_exception_handler)
+
 # Add middleware
 app.add_middleware(ErrorHandlingMiddleware)
 app.add_middleware(LoggingMiddleware)
@@ -83,9 +87,22 @@ oauth2_scheme = HTTPBearer()
 # Include authentication router
 app.include_router(auth.router)
 
-# Include analysis router
+# Include all routers
 from . import analysis
+from . import doctors
+from . import appointments
+from . import notifications
+from . import devices
+from . import health_analytics
+from . import settings as settings_router
+
 app.include_router(analysis.router)
+app.include_router(doctors.router)
+app.include_router(appointments.router)
+app.include_router(notifications.router)
+app.include_router(devices.router)
+app.include_router(health_analytics.router)
+app.include_router(settings_router.router)
 
 # Health check endpoint
 @app.get("/health")
@@ -100,16 +117,38 @@ def health_check():
         "database": {
             "ok": getattr(app.state, "db_init_ok", True),
             "error": getattr(app.state, "db_init_error", None)
+        },
+        "auth": {
+            "secret_key_configured": bool(settings.SECRET_KEY and settings.SECRET_KEY != "change-me-in-prod"),
+            "jwt_algorithm": settings.ALGORITHM,
+            "token_expiry_minutes": settings.ACCESS_TOKEN_EXPIRE_MINUTES
         }
     }
 
 # Dependency to get current user from JWT
 def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(oauth2_scheme)):
     token = credentials.credentials
+    logger.info(f"Processing JWT token for authentication")
     payload = decode_jwt_token(token)
     if not payload:
+        logger.warning("JWT token decode failed - invalid or expired token")
         raise HTTPException(status_code=401, detail="Invalid or expired token")
-    return int(payload.get("sub"))  # user_id as int
+    
+    user_id = payload.get("sub")
+    if not user_id:
+        logger.warning("JWT token missing user ID")
+        raise HTTPException(status_code=401, detail="Invalid token: missing user ID")
+    
+    # Handle both string and int user IDs
+    try:
+        user_id_int = int(user_id)
+        logger.info(f"Successfully authenticated user ID: {user_id_int}")
+        return user_id_int
+    except (ValueError, TypeError):
+        logger.warning(f"Invalid user ID format in token: {user_id}")
+        raise HTTPException(status_code=401, detail="Invalid token: invalid user ID format")
+
+
 
 # ------------------------
 # Upload Images (three inputs, only first required)
@@ -206,12 +245,37 @@ def get_profile(
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
     
+    # Build profile photo URL
+    profile_photo_url = None
+    if user.profile_photo_url:
+        if user.profile_photo_url.startswith("http"):
+            profile_photo_url = user.profile_photo_url
+        else:
+            profile_photo_url = f"{settings.BASE_URL}/{user.profile_photo_url}"
+    
     return {
-        "id": user.id,
-        "full_name": user.full_name,
-        "mobile_number": user.mobile_number,
-        "profile_photo_url": user.profile_photo_url,
-        "created_at": user.created_at.isoformat()
+        "success": True,
+        "data": {
+            "id": user.id,
+            "full_name": user.full_name,
+            "mobile_number": user.mobile_number,
+            "profile_photo_url": profile_photo_url,
+            "created_at": user.created_at.isoformat()
+        },
+        "error": None
+    }
+
+# ------------------------
+# Test Authentication Endpoint
+# ------------------------
+@app.get("/test-auth")
+def test_auth(current_user: int = Depends(get_current_user)):
+    """Test endpoint to verify authentication is working"""
+    return {
+        "success": True,
+        "message": "Authentication successful",
+        "user_id": current_user,
+        "timestamp": datetime.utcnow().isoformat()
     }
 
 # ------------------------
@@ -264,12 +328,24 @@ def update_profile(
     session.commit()
     session.refresh(user)
     
+    # Build profile photo URL
+    profile_photo_url = None
+    if user.profile_photo_url:
+        if user.profile_photo_url.startswith("http"):
+            profile_photo_url = user.profile_photo_url
+        else:
+            profile_photo_url = f"{settings.BASE_URL}/{user.profile_photo_url}"
+    
     return {
-        "id": user.id,
-        "full_name": user.full_name,
-        "mobile_number": user.mobile_number,
-        "profile_photo_url": user.profile_photo_url,
-        "created_at": user.created_at.isoformat()
+        "success": True,
+        "data": {
+            "id": user.id,
+            "full_name": user.full_name,
+            "mobile_number": user.mobile_number,
+            "profile_photo_url": profile_photo_url,
+            "created_at": user.created_at.isoformat()
+        },
+        "error": None
     }
 
 # ------------------------

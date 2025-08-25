@@ -65,6 +65,12 @@ def migrate_database():
                     else:
                         print(f"Error adding column {column_name}: {e}")
         
+        # Check if user table exists and add new columns if needed
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='user'")
+        if cursor.fetchone():
+            # Add any new columns to user table if needed
+            pass
+        
         conn.commit()
         conn.close()
         print("Database migration completed successfully")

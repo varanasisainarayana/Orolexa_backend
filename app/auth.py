@@ -48,7 +48,14 @@ def login_send_otp(payload: SendOTPRequest):
         with Session(engine) as session:
             session.add(OTPRequest(mobile_number=payload.mobile_number, otp_code="***"))
             session.commit()
-        return {"message": "OTP sent successfully for login", "status": getattr(verification, "status", "pending")}
+        return {
+            "success": True,
+            "data": {
+                "message": "OTP sent successfully for login",
+                "status": "success"
+            },
+            "error": None
+        }
     except HTTPException:
         raise
     except Exception as e:
@@ -88,7 +95,14 @@ def login_verify_otp(payload: VerifyOTPRequest):
         session.refresh(user)
         token = create_jwt_token({"sub": str(user.id)})
 
-        return {"access_token": token, "token_type": "bearer"}
+        return {
+            "success": True,
+            "data": {
+                "access_token": token,
+                "token_type": "bearer"
+            },
+            "error": None
+        }
 
 
 # -----------------------
@@ -98,46 +112,58 @@ def login_verify_otp(payload: VerifyOTPRequest):
 def register_send_otp(
     mobile_number: str = Form(...),
     full_name: str = Form(...),
-    profile_photo: UploadFile = File(...)
+    profile_photo: UploadFile = File(None)  # Make profile photo optional
 ):
     # Quick env guard
     if not (settings.TWILIO_ACCOUNT_SID and settings.TWILIO_AUTH_TOKEN and settings.TWILIO_VERIFY_SERVICE_SID):
         raise HTTPException(status_code=500, detail="Twilio credentials not configured")
-    # Validate file type
-    if profile_photo.content_type not in settings.ALLOWED_IMAGE_TYPES:
-        raise HTTPException(status_code=415, detail="Invalid file type")
-    # Validate file size
-    profile_photo.file.seek(0, 2)
-    file_size = profile_photo.file.tell()
-    profile_photo.file.seek(0)
-    if file_size > settings.MAX_FILE_SIZE:
-        raise HTTPException(status_code=413, detail="File too large")
+    
+    # Check if user already exists BEFORE processing anything else
+    with Session(engine) as session:
+        existing_user = session.exec(select(User).where(User.mobile_number == mobile_number)).first()
+        if existing_user:
+            raise HTTPException(status_code=400, detail="User with this mobile number already exists")
+    
+    # Handle profile photo if provided
+    saved_path = None
+    if profile_photo:
+        # Validate file type
+        if profile_photo.content_type not in settings.ALLOWED_IMAGE_TYPES:
+            raise HTTPException(status_code=415, detail="Invalid file type")
+        # Validate file size
+        profile_photo.file.seek(0, 2)
+        file_size = profile_photo.file.tell()
+        profile_photo.file.seek(0)
+        if file_size > settings.MAX_FILE_SIZE:
+            raise HTTPException(status_code=413, detail="File too large")
 
-    uploads_dir = f"{settings.UPLOAD_DIR}/profiles"
-    os.makedirs(uploads_dir, exist_ok=True)
-    ext = os.path.splitext(profile_photo.filename)[1]
-    filename = f"{uuid.uuid4().hex}{ext}"
-    saved_path = os.path.join(uploads_dir, filename)
+        uploads_dir = f"{settings.UPLOAD_DIR}/profiles"
+        os.makedirs(uploads_dir, exist_ok=True)
+        ext = os.path.splitext(profile_photo.filename)[1]
+        filename = f"{uuid.uuid4().hex}{ext}"
+        saved_path = os.path.join(uploads_dir, filename)
 
-    try:
-        with open(saved_path, "wb") as f:
-            shutil.copyfileobj(profile_photo.file, f)
-    except Exception as e:
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"Could not save profile photo: {e}")
+        try:
+            with open(saved_path, "wb") as f:
+                shutil.copyfileobj(profile_photo.file, f)
+        except Exception as e:
+            traceback.print_exc()
+            raise HTTPException(status_code=500, detail=f"Could not save profile photo: {e}")
 
     try:
         verification = client.verify.services(settings.TWILIO_VERIFY_SERVICE_SID) \
             .verifications.create(to=mobile_number, channel="sms")
     except Exception as e:
         traceback.print_exc()
-        try:
-            os.remove(saved_path)
-        except:
-            pass
+        if saved_path:
+            try:
+                os.remove(saved_path)
+            except:
+                pass
         raise HTTPException(status_code=500, detail=f"Twilio error: {e}")
 
     with Session(engine) as session:
+
         otp_entry = OTPRequest(
             mobile_number=mobile_number,
             otp_code="***",
@@ -148,7 +174,14 @@ def register_send_otp(
         session.add(otp_entry)
         session.commit()
 
-    return {"message": "OTP sent successfully for registration", "status": getattr(verification, "status", "pending")}
+    return {
+        "success": True,
+        "data": {
+            "message": "OTP sent successfully for registration",
+            "status": "success"
+        },
+        "error": None
+    }
 
 
 @router.post("/register/verify-otp")
@@ -170,29 +203,29 @@ def register_verify_otp(payload: VerifyOTPRequest):
             .order_by(OTPRequest.created_at.desc())
         ).first()
 
-        if not otp_entry or not otp_entry.full_name or not otp_entry.profile_photo_url:
+        if not otp_entry or not otp_entry.full_name:
             raise HTTPException(status_code=400, detail="No registration data found. Please call register/send-otp first.")
 
         otp_entry.is_verified = True
         session.add(otp_entry)
         session.commit()
 
-        # Create or update user
-        user = session.exec(select(User).where(User.mobile_number == payload.mobile_number)).first()
-        if not user:
-            user = User(
-                mobile_number=payload.mobile_number,
-                full_name=otp_entry.full_name,
-                profile_photo_url=otp_entry.profile_photo_url
-            )
-            session.add(user)
-        else:
-            user.full_name = otp_entry.full_name
-            user.profile_photo_url = otp_entry.profile_photo_url
-            session.add(user)
-
+        # Create new user (should not exist at this point due to check in send-otp)
+        user = User(
+            mobile_number=payload.mobile_number,
+            full_name=otp_entry.full_name,
+            profile_photo_url=otp_entry.profile_photo_url
+        )
+        session.add(user)
         session.commit()
         session.refresh(user)
 
         token = create_jwt_token({"sub": str(user.id)})
-        return {"access_token": token, "token_type": "bearer"}
+        return {
+            "success": True,
+            "data": {
+                "access_token": token,
+                "token_type": "bearer"
+            },
+            "error": None
+        }

@@ -9,6 +9,7 @@ from datetime import datetime
 import traceback
 from PIL import Image
 import io
+import logging
 
 from .utils import decode_jwt_token
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
@@ -16,6 +17,9 @@ from .database import get_session
 from .models import AnalysisHistory, User
 from .config import settings
 from .storage import get_storage
+
+# Configure logging
+logger = logging.getLogger(__name__)
 
 # Configure Gemini API from env (make sure GEMINI_API_KEY is set)
 genai.configure(api_key=settings.GEMINI_API_KEY)
@@ -30,8 +34,22 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(oauth2_
     token = credentials.credentials
     payload = decode_jwt_token(token)
     if not payload:
+        logger.warning("JWT token decode failed - invalid or expired token")
         raise HTTPException(status_code=401, detail="Invalid or expired token")
-    return int(payload.get("sub"))  # user_id as int
+    
+    user_id = payload.get("sub")
+    if not user_id:
+        logger.warning("JWT token missing user ID")
+        raise HTTPException(status_code=401, detail="Invalid token: missing user ID")
+    
+    # Handle both string and int user IDs
+    try:
+        user_id_int = int(user_id)
+        logger.info(f"Successfully authenticated user ID: {user_id_int}")
+        return user_id_int
+    except (ValueError, TypeError):
+        logger.warning(f"Invalid user ID format in token: {user_id}")
+        raise HTTPException(status_code=401, detail="Invalid token: invalid user ID format")
 
 def _extract_text_from_gemini_result(result) -> str:
     """Safely extract text from different Gemini result shapes."""
@@ -234,19 +252,27 @@ def get_history(
     session: Session = Depends(get_session)
 ):
     try:
+        logger.info(f"Getting history for user: {current_user} (type: {type(current_user)})")
         user = None
         try:
             user_id_candidate = int(current_user)
             user = session.exec(select(User).where(User.id == user_id_candidate)).first()
-        except Exception:
+            logger.info(f"Found user by ID: {user_id_candidate}")
+        except Exception as e:
+            logger.warning(f"Failed to find user by ID {current_user}: {e}")
             user = session.exec(select(User).where(User.mobile_number == current_user)).first()
+            logger.info(f"Found user by mobile number: {current_user}")
         if not user:
+            logger.error(f"User not found for ID/mobile: {current_user}")
             raise HTTPException(status_code=404, detail="User not found")
         histories = session.exec(
             select(AnalysisHistory)
             .where(AnalysisHistory.user_id == user.id)
             .order_by(AnalysisHistory.created_at.desc())
         ).all()
+        
+        logger.info(f"Found {len(histories)} history entries for user {user.id}")
+        
         BASE_URL = settings.BASE_URL
         history_data = [
             {
@@ -260,9 +286,12 @@ def get_history(
             }
             for h in histories
         ]
+        
+        logger.info(f"Successfully retrieved history for user {user.id}")
         return {"success": True, "data": history_data}
     except HTTPException:
         raise
     except Exception as e:
+        logger.error(f"Error in get_history: {str(e)}", exc_info=True)
         traceback.print_exc()
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
