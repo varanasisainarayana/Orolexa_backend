@@ -1,8 +1,5 @@
 # app/streaming.py
 import asyncio
-import cv2
-import numpy as np
-import aiohttp
 import logging
 from typing import Optional, Dict, Any
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, HTTPException, Depends
@@ -10,9 +7,20 @@ from fastapi.responses import StreamingResponse
 import io
 from PIL import Image
 import base64
+import aiohttp
+import numpy as np
 from .utils import decode_jwt_token
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from .config import settings
+
+# Try lazy import for OpenCV
+cv2 = None
+try:
+    import cv2 as _cv2
+    cv2 = _cv2
+except Exception as e:
+    # Defer error until endpoints that require cv2 are called
+    cv2 = None
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -136,6 +144,11 @@ async def websocket_stream(websocket: WebSocket):
                 await asyncio.sleep(1)
                 continue
             
+            if cv2 is None:
+                await websocket.send_text("OpenCV not available on server")
+                await asyncio.sleep(1)
+                continue
+            
             # Capture frame from ESP32 camera
             frame = await capture_frame_from_esp32()
             if frame is not None:
@@ -162,6 +175,8 @@ async def get_snapshot(current_user: str = Depends(get_current_user)):
     
     if not esp32_camera or not esp32_camera.is_connected:
         raise HTTPException(status_code=400, detail="ESP32 camera not connected")
+    if cv2 is None:
+        raise HTTPException(status_code=500, detail="OpenCV (cv2) is not available on server")
     
     try:
         frame = await capture_frame_from_esp32()
@@ -191,6 +206,8 @@ async def stream_video(current_user: str = Depends(get_current_user)):
     
     if not esp32_camera or not esp32_camera.is_connected:
         raise HTTPException(status_code=400, detail="ESP32 camera not connected")
+    if cv2 is None:
+        raise HTTPException(status_code=500, detail="OpenCV (cv2) is not available on server")
     
     async def generate_frames():
         while True:
@@ -221,9 +238,9 @@ async def capture_frame_from_esp32() -> Optional[np.ndarray]:
     """
     Capture a frame from ESP32 camera
     """
-    global esp32_camera
+    global esp32_camera, cv2
     
-    if not esp32_camera:
+    if not esp32_camera or cv2 is None:
         return None
     
     try:
@@ -250,7 +267,10 @@ def frame_to_base64(frame: np.ndarray) -> str:
     """
     Convert OpenCV frame to base64 string
     """
+    global cv2
     try:
+        if cv2 is None:
+            return ""
         # Convert BGR to RGB
         frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         
@@ -273,10 +293,12 @@ async def analyze_stream_frame(current_user: str = Depends(get_current_user)):
     """
     Capture a frame from ESP32 camera and analyze it using the dental AI
     """
-    global esp32_camera
+    global esp32_camera, cv2
     
     if not esp32_camera or not esp32_camera.is_connected:
         raise HTTPException(status_code=400, detail="ESP32 camera not connected")
+    if cv2 is None:
+        raise HTTPException(status_code=500, detail="OpenCV (cv2) is not available on server")
     
     try:
         # Capture frame

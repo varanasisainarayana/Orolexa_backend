@@ -9,7 +9,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PYTHONPATH=/app
 
-# Install system dependencies
+# Install system dependencies (add libGL for OpenCV)
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         gcc \
@@ -19,6 +19,11 @@ RUN apt-get update \
         libpng-dev \
         libwebp-dev \
         libffi-dev \
+        libglib2.0-0 \
+        libsm6 \
+        libxext6 \
+        libxrender1 \
+        libgl1 \
         curl \
     && rm -rf /var/lib/apt/lists/*
 
