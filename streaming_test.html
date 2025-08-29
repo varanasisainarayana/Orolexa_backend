@@ -1,0 +1,374 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ESP32 Camera Streaming Test</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        .container {
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            margin-bottom: 20px;
+        }
+        .video-container {
+            text-align: center;
+            margin: 20px 0;
+        }
+        #videoStream {
+            max-width: 100%;
+            border: 2px solid #ddd;
+            border-radius: 8px;
+        }
+        .controls {
+            display: flex;
+            gap: 10px;
+            margin: 20px 0;
+            flex-wrap: wrap;
+        }
+        button {
+            padding: 10px 20px;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 14px;
+            transition: background-color 0.3s;
+        }
+        .btn-primary {
+            background-color: #007bff;
+            color: white;
+        }
+        .btn-primary:hover {
+            background-color: #0056b3;
+        }
+        .btn-success {
+            background-color: #28a745;
+            color: white;
+        }
+        .btn-success:hover {
+            background-color: #1e7e34;
+        }
+        .btn-danger {
+            background-color: #dc3545;
+            color: white;
+        }
+        .btn-danger:hover {
+            background-color: #c82333;
+        }
+        .btn-warning {
+            background-color: #ffc107;
+            color: black;
+        }
+        .btn-warning:hover {
+            background-color: #e0a800;
+        }
+        input[type="text"], input[type="number"] {
+            padding: 8px 12px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            font-size: 14px;
+        }
+        .status {
+            padding: 10px;
+            border-radius: 4px;
+            margin: 10px 0;
+        }
+        .status.connected {
+            background-color: #d4edda;
+            color: #155724;
+            border: 1px solid #c3e6cb;
+        }
+        .status.disconnected {
+            background-color: #f8d7da;
+            color: #721c24;
+            border: 1px solid #f5c6cb;
+        }
+        .status.info {
+            background-color: #d1ecf1;
+            color: #0c5460;
+            border: 1px solid #bee5eb;
+        }
+        .websocket-status {
+            font-weight: bold;
+            margin: 10px 0;
+        }
+        .websocket-status.connected {
+            color: #28a745;
+        }
+        .websocket-status.disconnected {
+            color: #dc3545;
+        }
+    </style>
+</head>
+<body>
+    <h1>ESP32 Camera Streaming Test</h1>
+    
+    <div class="container">
+        <h2>Camera Setup</h2>
+        <div class="controls">
+            <input type="text" id="ipAddress" placeholder="ESP32 IP Address" value="192.168.1.100">
+            <input type="number" id="port" placeholder="Port" value="80" min="1" max="65535">
+            <button class="btn-primary" onclick="setupCamera()">Setup Camera</button>
+            <button class="btn-danger" onclick="disconnectCamera()">Disconnect</button>
+        </div>
+        <div id="cameraStatus" class="status info">Camera not configured</div>
+    </div>
+
+    <div class="container">
+        <h2>Video Streaming</h2>
+        <div class="controls">
+            <button class="btn-success" onclick="startStream()">Start Stream</button>
+            <button class="btn-warning" onclick="startWebSocketStream()">Start WebSocket Stream</button>
+            <button class="btn-primary" onclick="getSnapshot()">Get Snapshot</button>
+            <button class="btn-warning" onclick="analyzeFrame()">Analyze Frame</button>
+        </div>
+        <div class="websocket-status disconnected" id="wsStatus">WebSocket: Disconnected</div>
+        <div class="video-container">
+            <img id="videoStream" src="" alt="Video Stream" style="display: none;">
+        </div>
+    </div>
+
+    <div class="container">
+        <h2>Analysis Results</h2>
+        <div id="analysisResults" class="status info">No analysis performed yet</div>
+    </div>
+
+    <script>
+        let websocket = null;
+        let isStreaming = false;
+        const API_BASE = 'http://localhost:8000'; // Change this to your API URL
+        const TOKEN = 'your-jwt-token-here'; // Replace with actual JWT token
+
+        // Setup camera connection
+        async function setupCamera() {
+            const ipAddress = document.getElementById('ipAddress').value;
+            const port = document.getElementById('port').value;
+            
+            if (!ipAddress) {
+                alert('Please enter IP address');
+                return;
+            }
+
+            try {
+                const response = await fetch(`${API_BASE}/streaming/setup-camera`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${TOKEN}`
+                    },
+                    body: JSON.stringify({
+                        ip_address: ipAddress,
+                        port: parseInt(port)
+                    })
+                });
+
+                const data = await response.json();
+                
+                if (data.success) {
+                    document.getElementById('cameraStatus').innerHTML = 
+                        `<strong>Connected:</strong> ${data.message}<br>
+                         <strong>Camera URL:</strong> ${data.camera_url}<br>
+                         <strong>Stream URL:</strong> ${data.stream_url}`;
+                    document.getElementById('cameraStatus').className = 'status connected';
+                } else {
+                    document.getElementById('cameraStatus').innerHTML = 
+                        `<strong>Error:</strong> ${data.detail || 'Failed to connect'}`;
+                    document.getElementById('cameraStatus').className = 'status disconnected';
+                }
+            } catch (error) {
+                console.error('Error setting up camera:', error);
+                document.getElementById('cameraStatus').innerHTML = 
+                    `<strong>Error:</strong> ${error.message}`;
+                document.getElementById('cameraStatus').className = 'status disconnected';
+            }
+        }
+
+        // Disconnect camera
+        async function disconnectCamera() {
+            try {
+                const response = await fetch(`${API_BASE}/streaming/disconnect-camera`, {
+                    method: 'DELETE',
+                    headers: {
+                        'Authorization': `Bearer ${TOKEN}`
+                    }
+                });
+
+                const data = await response.json();
+                
+                if (data.success) {
+                    document.getElementById('cameraStatus').innerHTML = 
+                        `<strong>Disconnected:</strong> ${data.message}`;
+                    document.getElementById('cameraStatus').className = 'status disconnected';
+                    
+                    // Stop streaming
+                    if (isStreaming) {
+                        document.getElementById('videoStream').style.display = 'none';
+                        isStreaming = false;
+                    }
+                    
+                    // Close WebSocket
+                    if (websocket) {
+                        websocket.close();
+                        websocket = null;
+                        updateWebSocketStatus(false);
+                    }
+                }
+            } catch (error) {
+                console.error('Error disconnecting camera:', error);
+            }
+        }
+
+        // Start video stream
+        function startStream() {
+            const videoElement = document.getElementById('videoStream');
+            videoElement.src = `${API_BASE}/streaming/stream`;
+            videoElement.style.display = 'block';
+            isStreaming = true;
+        }
+
+        // Start WebSocket stream
+        function startWebSocketStream() {
+            if (websocket) {
+                websocket.close();
+            }
+
+            const wsUrl = API_BASE.replace('http', 'ws') + '/streaming/ws-stream';
+            websocket = new WebSocket(wsUrl);
+
+            websocket.onopen = function(event) {
+                updateWebSocketStatus(true);
+                console.log('WebSocket connected');
+            };
+
+            websocket.onmessage = function(event) {
+                if (event.data.startsWith('data:image/jpeg;base64,')) {
+                    const videoElement = document.getElementById('videoStream');
+                    videoElement.src = event.data;
+                    videoElement.style.display = 'block';
+                    isStreaming = true;
+                } else {
+                    console.log('WebSocket message:', event.data);
+                }
+            };
+
+            websocket.onclose = function(event) {
+                updateWebSocketStatus(false);
+                console.log('WebSocket disconnected');
+            };
+
+            websocket.onerror = function(error) {
+                updateWebSocketStatus(false);
+                console.error('WebSocket error:', error);
+            };
+        }
+
+        // Update WebSocket status display
+        function updateWebSocketStatus(connected) {
+            const statusElement = document.getElementById('wsStatus');
+            if (connected) {
+                statusElement.textContent = 'WebSocket: Connected';
+                statusElement.className = 'websocket-status connected';
+            } else {
+                statusElement.textContent = 'WebSocket: Disconnected';
+                statusElement.className = 'websocket-status disconnected';
+            }
+        }
+
+        // Get snapshot
+        async function getSnapshot() {
+            try {
+                const response = await fetch(`${API_BASE}/streaming/snapshot`, {
+                    headers: {
+                        'Authorization': `Bearer ${TOKEN}`
+                    }
+                });
+
+                if (response.ok) {
+                    const blob = await response.blob();
+                    const imageUrl = URL.createObjectURL(blob);
+                    const videoElement = document.getElementById('videoStream');
+                    videoElement.src = imageUrl;
+                    videoElement.style.display = 'block';
+                    isStreaming = false;
+                } else {
+                    console.error('Failed to get snapshot');
+                }
+            } catch (error) {
+                console.error('Error getting snapshot:', error);
+            }
+        }
+
+        // Analyze frame
+        async function analyzeFrame() {
+            try {
+                const response = await fetch(`${API_BASE}/streaming/analyze-stream`, {
+                    method: 'POST',
+                    headers: {
+                        'Authorization': `Bearer ${TOKEN}`
+                    }
+                });
+
+                const data = await response.json();
+                
+                if (data.success) {
+                    document.getElementById('analysisResults').innerHTML = 
+                        `<strong>Analysis Result:</strong><br>
+                         <strong>Message:</strong> ${data.message}<br>
+                         <strong>Frame Size:</strong> ${data.frame_size}<br>
+                         <strong>Image Bytes:</strong> ${data.image_bytes_length}<br>
+                         <strong>Camera URL:</strong> ${data.camera_url}`;
+                    document.getElementById('analysisResults').className = 'status connected';
+                } else {
+                    document.getElementById('analysisResults').innerHTML = 
+                        `<strong>Analysis Failed:</strong> ${data.detail || 'Unknown error'}`;
+                    document.getElementById('analysisResults').className = 'status disconnected';
+                }
+            } catch (error) {
+                console.error('Error analyzing frame:', error);
+                document.getElementById('analysisResults').innerHTML = 
+                    `<strong>Analysis Error:</strong> ${error.message}`;
+                document.getElementById('analysisResults').className = 'status disconnected';
+            }
+        }
+
+        // Check camera status on page load
+        async function checkCameraStatus() {
+            try {
+                const response = await fetch(`${API_BASE}/streaming/camera-status`, {
+                    headers: {
+                        'Authorization': `Bearer ${TOKEN}`
+                    }
+                });
+
+                const data = await response.json();
+                
+                if (data.success && data.is_connected) {
+                    document.getElementById('cameraStatus').innerHTML = 
+                        `<strong>Connected:</strong> Camera is connected<br>
+                         <strong>Camera URL:</strong> ${data.camera_url}`;
+                    document.getElementById('cameraStatus').className = 'status connected';
+                } else {
+                    document.getElementById('cameraStatus').innerHTML = 
+                        `<strong>Status:</strong> ${data.message}`;
+                    document.getElementById('cameraStatus').className = 'status disconnected';
+                }
+            } catch (error) {
+                console.error('Error checking camera status:', error);
+            }
+        }
+
+        // Initialize page
+        window.onload = function() {
+            checkCameraStatus();
+        };
+    </script>
+</body>
+</html>

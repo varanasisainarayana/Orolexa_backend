@@ -91,6 +91,30 @@ app.mount("/uploads", StaticFiles(directory=settings.UPLOAD_DIR), name="uploads"
 # Auth scheme
 oauth2_scheme = HTTPBearer(auto_error=False)
 
+# Dependency to get current user from JWT
+def get_current_user(request: Request, credentials: HTTPAuthorizationCredentials = Depends(oauth2_scheme)):
+    token = None
+    if credentials and credentials.credentials:
+        token = credentials.credentials
+    else:
+        # Fallback to cookie
+        token = request.cookies.get("access_token")
+    if not token:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    logger.info(f"Processing JWT token for authentication")
+    payload = decode_jwt_token(token)
+    if not payload:
+        logger.warning("JWT token decode failed - invalid or expired token")
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    
+    user_id = payload.get("sub")
+    if not user_id:
+        logger.warning("JWT token missing user ID")
+        raise HTTPException(status_code=401, detail="Invalid token: missing user ID")
+    
+    logger.info(f"Successfully authenticated user ID: {user_id}")
+    return user_id
+
 # Include authentication router
 app.include_router(auth.router)
 
@@ -102,6 +126,7 @@ from . import notifications
 from . import devices
 from . import health_analytics
 from . import settings as settings_router
+from . import streaming
 
 app.include_router(analysis.router)
 app.include_router(doctors.router)
@@ -110,6 +135,7 @@ app.include_router(notifications.router)
 app.include_router(devices.router)
 app.include_router(health_analytics.router)
 app.include_router(settings_router.router)
+app.include_router(streaming.router)
 
 # Health check endpoint
 @app.get("/health")
@@ -132,35 +158,7 @@ def health_check():
         }
     }
 
-# Dependency to get current user from JWT
-def get_current_user(request: Request, credentials: HTTPAuthorizationCredentials = Depends(oauth2_scheme)):
-    token = None
-    if credentials and credentials.credentials:
-        token = credentials.credentials
-    else:
-        # Fallback to cookie
-        token = request.cookies.get("access_token")
-    if not token:
-        raise HTTPException(status_code=401, detail="Invalid or expired token")
-    logger.info(f"Processing JWT token for authentication")
-    payload = decode_jwt_token(token)
-    if not payload:
-        logger.warning("JWT token decode failed - invalid or expired token")
-        raise HTTPException(status_code=401, detail="Invalid or expired token")
-    
-    user_id = payload.get("sub")
-    if not user_id:
-        logger.warning("JWT token missing user ID")
-        raise HTTPException(status_code=401, detail="Invalid token: missing user ID")
-    
-    # Handle both string and int user IDs
-    try:
-        user_id_int = int(user_id)
-        logger.info(f"Successfully authenticated user ID: {user_id_int}")
-        return user_id_int
-    except (ValueError, TypeError):
-        logger.warning(f"Invalid user ID format in token: {user_id}")
-        raise HTTPException(status_code=401, detail="Invalid token: invalid user ID format")
+
 
 
 
@@ -172,7 +170,7 @@ def upload_image(
     file1: UploadFile = File(None),
     file2: UploadFile = File(None),
     file3: UploadFile = File(None),
-    current_user: int = Depends(get_current_user)
+    current_user: str = Depends(get_current_user)
 ):
     try:
         upload_dir = settings.UPLOAD_DIR

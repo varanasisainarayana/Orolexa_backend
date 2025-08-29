@@ -1,32 +1,176 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, validator
 from typing import Optional, List, Dict, Any
 from datetime import datetime
-
-
-# =========================
-# OTP Send Requests
-# =========================
-class SendOTPRequest(BaseModel):
-    mobile_number: str
-
+import re
+import base64
+from PIL import Image
+import io
 
 # =========================
-# OTP Verify Requests (Login)
+# Authentication Schemas
 # =========================
+
+class LoginRequest(BaseModel):
+    phone: str = Field(..., description="Phone number with country code")
+    country_code: str = Field(..., description="Country code")
+
+    @validator('phone')
+    def validate_phone(cls, v):
+        # Remove any non-digit characters except +
+        phone_clean = re.sub(r'[^\d+]', '', v)
+        if not re.match(r'^\+\d{1,4}\d{6,14}$', phone_clean):
+            raise ValueError('Invalid phone number format. Must include country code.')
+        return phone_clean
+
+    @validator('country_code')
+    def validate_country_code(cls, v):
+        if not re.match(r'^\+\d{1,4}$', v):
+            raise ValueError('Invalid country code format')
+        return v
+
+class LoginResponse(BaseModel):
+    success: bool
+    message: str
+    data: Dict[str, Any]
+
+class RegisterRequest(BaseModel):
+    name: str = Field(..., min_length=2, max_length=100, description="User's full name")
+    phone: str = Field(..., description="Phone number with country code")
+    country_code: str = Field(..., description="Country code")
+    age: Optional[int] = Field(None, ge=1, le=120, description="User's age")
+    profile_image: Optional[str] = Field(None, description="Base64 encoded profile image")
+    date_of_birth: Optional[str] = Field(None, description="Date of birth in YYYY-MM-DD format")
+
+    @validator('name')
+    def validate_name(cls, v):
+        if not re.match(r'^[a-zA-Z\s\-]+$', v):
+            raise ValueError('Name can only contain letters, spaces, and hyphens')
+        return v.strip()
+
+    @validator('phone')
+    def validate_phone(cls, v):
+        phone_clean = re.sub(r'[^\d+]', '', v)
+        if not re.match(r'^\+\d{1,4}\d{6,14}$', phone_clean):
+            raise ValueError('Invalid phone number format. Must include country code.')
+        return phone_clean
+
+    @validator('country_code')
+    def validate_country_code(cls, v):
+        if not re.match(r'^\+\d{1,4}$', v):
+            raise ValueError('Invalid country code format')
+        return v
+
+    @validator('age')
+    def validate_age(cls, v):
+        if v is not None and (v < 1 or v > 120):
+            raise ValueError('Age must be between 1 and 120')
+        return v
+
+    @validator('date_of_birth')
+    def validate_date_of_birth(cls, v):
+        if v is not None:
+            try:
+                dob = datetime.strptime(v, '%Y-%m-%d')
+                if dob > datetime.now():
+                    raise ValueError('Date of birth cannot be in the future')
+                if (datetime.now() - dob).days > 43800:  # 120 years
+                    raise ValueError('Date of birth is too far in the past')
+            except ValueError as e:
+                if 'Date of birth' in str(e):
+                    raise e
+                raise ValueError('Invalid date format. Use YYYY-MM-DD')
+        return v
+
+    @validator('profile_image')
+    def validate_profile_image(cls, v):
+        if v is not None:
+            try:
+                # Check if it's a valid base64 image
+                if not v.startswith('data:image/'):
+                    raise ValueError('Profile image must be a valid base64 encoded image')
+                
+                # Extract base64 data
+                header, data = v.split(',', 1)
+                image_data = base64.b64decode(data)
+                
+                # Check file size (5MB limit)
+                if len(image_data) > 5 * 1024 * 1024:
+                    raise ValueError('Profile image size must be less than 5MB')
+                
+                # Validate image format
+                image = Image.open(io.BytesIO(image_data))
+                if image.format not in ['JPEG', 'PNG', 'WEBP']:
+                    raise ValueError('Profile image must be JPEG, PNG, or WebP format')
+                
+            except Exception as e:
+                if 'Profile image' in str(e):
+                    raise e
+                raise ValueError('Invalid profile image format')
+        return v
+
+class RegisterResponse(BaseModel):
+    success: bool
+    message: str
+    data: Dict[str, Any]
+
 class VerifyOTPRequest(BaseModel):
-    mobile_number: str
-    otp_code: str
+    phone: str = Field(..., description="Phone number with country code")
+    otp: str = Field(..., min_length=6, max_length=6, description="6-digit OTP")
+    flow: str = Field(..., description="Flow type: 'login' or 'register'")
 
+    @validator('phone')
+    def validate_phone(cls, v):
+        phone_clean = re.sub(r'[^\d+]', '', v)
+        if not re.match(r'^\+\d{1,4}\d{6,14}$', phone_clean):
+            raise ValueError('Invalid phone number format')
+        return phone_clean
 
-# =========================
-# OTP Verify Requests (Registration)
-# =========================
-class RegisterVerifyRequest(BaseModel):
-    mobile_number: str
-    otp_code: str
-    full_name: str  # REQUIRED for registration
-    profile_photo_url: str  # REQUIRED for registration
+    @validator('otp')
+    def validate_otp(cls, v):
+        if not v.isdigit() or len(v) != 6:
+            raise ValueError('OTP must be 6 digits')
+        return v
 
+    @validator('flow')
+    def validate_flow(cls, v):
+        if v not in ['login', 'register']:
+            raise ValueError('Flow must be either "login" or "register"')
+        return v
+
+class VerifyOTPResponse(BaseModel):
+    success: bool
+    message: str
+    data: Dict[str, Any]
+
+class ResendOTPRequest(BaseModel):
+    phone: str = Field(..., description="Phone number with country code")
+
+    @validator('phone')
+    def validate_phone(cls, v):
+        phone_clean = re.sub(r'[^\d+]', '', v)
+        if not re.match(r'^\+\d{1,4}\d{6,14}$', phone_clean):
+            raise ValueError('Invalid phone number format')
+        return phone_clean
+
+class ResendOTPResponse(BaseModel):
+    success: bool
+    message: str
+    data: Dict[str, Any]
+
+class UserResponse(BaseModel):
+    id: str
+    name: str
+    phone: str
+    age: Optional[int] = None
+    profile_image_url: Optional[str] = None
+    date_of_birth: Optional[str] = None
+    created_at: datetime
+    updated_at: datetime
+
+class AuthResponse(BaseModel):
+    user: UserResponse
+    token: str
+    refresh_token: str
 
 # =========================
 # Doctor Schemas
@@ -186,3 +330,28 @@ class MessageResponse(BaseModel):
 class PaginatedResponse(BaseModel):
     items: List[Any]
     pagination: Dict[str, Any]
+
+# =========================
+# Error Response Schemas
+# =========================
+class ErrorResponse(BaseModel):
+    success: bool = False
+    message: str
+    error: str
+    status_code: Optional[int] = None
+
+# =========================
+# Legacy Schemas (for backward compatibility)
+# =========================
+class SendOTPRequest(BaseModel):
+    mobile_number: str
+
+class VerifyOTPRequest(BaseModel):
+    mobile_number: str
+    otp_code: str
+
+class RegisterVerifyRequest(BaseModel):
+    mobile_number: str
+    otp_code: str
+    full_name: str
+    profile_photo_url: str
