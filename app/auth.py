@@ -6,7 +6,8 @@ from .models import User, OTPCode, UserSession
 from .schemas import (
     LoginRequest, LoginResponse, RegisterRequest, RegisterResponse,
     VerifyOTPRequest, VerifyOTPResponse, ResendOTPRequest, ResendOTPResponse,
-    UserResponse, AuthResponse, ErrorResponse
+    UserResponse, AuthResponse, ErrorResponse, UpdateProfileRequest, UpdateProfileResponse,
+    UploadImageRequest, UploadImageResponse, DeleteImageResponse
 )
 from .utils import create_jwt_token, create_refresh_token, decode_jwt_token
 from twilio.rest import Client
@@ -800,10 +801,19 @@ async def register(payload: RegisterRequest, request: Request):
         
         # Save user data to database
         with Session(engine) as session:
+            # Check if username is already taken (if provided)
+            if payload.username:
+                existing_user = session.exec(
+                    select(User).where(User.username == payload.username)
+                ).first()
+                if existing_user:
+                    raise HTTPException(status_code=400, detail="Username already taken")
+            
             # Create user (will be activated after OTP verification)
             user = User(
                 id=user_id,
                 name=payload.name,
+                username=payload.username,
                 phone=payload.phone,
                 country_code=extract_country_code(payload.phone),
                 age=payload.age,
@@ -911,6 +921,7 @@ async def verify_otp(payload: VerifyOTPRequest):
         user_response = UserResponse(
             id=user.id,
             name=user.name,
+            username=user.username,
             phone=user.phone,
             age=user.age,
             profile_image_url=user.profile_image_url,
@@ -1040,6 +1051,243 @@ async def get_metrics():
     except Exception as e:
         logger.error(f"Metrics collection failed: {e}")
         raise HTTPException(status_code=500, detail="Failed to collect metrics")
+
+# Dependency to get current user from JWT token
+async def get_current_user(request: Request) -> User:
+    """Get current user from JWT token"""
+    try:
+        # Get token from Authorization header
+        auth_header = request.headers.get('Authorization')
+        if not auth_header or not auth_header.startswith('Bearer '):
+            raise HTTPException(status_code=401, detail="Invalid authorization header")
+        
+        token = auth_header.split(' ')[1]
+        
+        # Decode JWT token
+        payload = decode_jwt_token(token)
+        user_id = payload.get('sub')
+        
+        if not user_id:
+            raise HTTPException(status_code=401, detail="Invalid token")
+        
+        # Get user from database
+        with Session(engine) as session:
+            user = session.exec(
+                select(User).where(User.id == user_id)
+            ).first()
+            
+            if not user:
+                raise HTTPException(status_code=401, detail="User not found")
+            
+            return user
+            
+    except Exception as e:
+        logger.error(f"Error getting current user: {e}")
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+# Profile Management Endpoints
+@router.get("/profile/me", response_model=UserResponse)
+async def get_profile(current_user: User = Depends(get_current_user)):
+    """
+    Get current user profile
+    """
+    try:
+        # Audit logging
+        audit_log('profile_fetch', current_user.phone, current_user.id, 
+                 request_id=str(uuid.uuid4()), success=True)
+        
+        return UserResponse(
+            id=current_user.id,
+            name=current_user.name,
+            username=current_user.username,
+            phone=current_user.phone,
+            age=current_user.age,
+            profile_image_url=current_user.profile_image_url,
+            date_of_birth=current_user.date_of_birth.strftime('%Y-%m-%d') if current_user.date_of_birth else None,
+            created_at=current_user.created_at,
+            updated_at=current_user.updated_at
+        )
+        
+    except Exception as e:
+        logger.error(f"Error fetching profile for user {current_user.id}: {e}")
+        raise HTTPException(status_code=500, detail="Failed to fetch profile")
+
+@router.put("/profile/update", response_model=UpdateProfileResponse)
+async def update_profile(
+    payload: UpdateProfileRequest,
+    current_user: User = Depends(get_current_user),
+    request: Request = None
+):
+    """
+    Update current user profile
+    """
+    try:
+        request_id = str(uuid.uuid4())
+        client_info = get_client_info(request) if request else {}
+        
+        # Update user data
+        with Session(engine) as session:
+            user = session.exec(
+                select(User).where(User.id == current_user.id)
+            ).first()
+            
+            if not user:
+                raise HTTPException(status_code=404, detail="User not found")
+            
+            # Update fields if provided
+            if payload.name is not None:
+                user.name = payload.name
+            if payload.username is not None:
+                # Check if username is already taken by another user
+                existing_user = session.exec(
+                    select(User).where(User.username == payload.username, User.id != user.id)
+                ).first()
+                if existing_user:
+                    raise HTTPException(status_code=400, detail="Username already taken")
+                user.username = payload.username
+            if payload.age is not None:
+                user.age = payload.age
+            if payload.date_of_birth is not None:
+                user.date_of_birth = datetime.strptime(payload.date_of_birth, '%Y-%m-%d')
+            
+            # Handle profile image update
+            if payload.profile_image is not None:
+                try:
+                    profile_image_url = save_profile_image(payload.profile_image, user.id)
+                    if profile_image_url:
+                        user.profile_image_url = profile_image_url
+                except Exception as e:
+                    logger.error(f"Failed to save profile image: {e}")
+                    # Continue without updating profile image
+            
+            # Update timestamp
+            user.updated_at = datetime.utcnow()
+            
+            session.add(user)
+            session.commit()
+            session.refresh(user)
+        
+        # Audit logging
+        audit_log('profile_update', user.phone, user.id, request_id, 
+                 client_info.get('ip_address'), success=True)
+        
+        return UpdateProfileResponse(
+            success=True,
+            message="Profile updated successfully",
+            data={
+                "user": UserResponse(
+                    id=user.id,
+                    name=user.name,
+                    username=user.username,
+                    phone=user.phone,
+                    age=user.age,
+                    profile_image_url=user.profile_image_url,
+                    date_of_birth=user.date_of_birth.strftime('%Y-%m-%d') if user.date_of_birth else None,
+                    created_at=user.created_at,
+                    updated_at=user.updated_at
+                ).dict()
+            }
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error updating profile for user {current_user.id}: {e}")
+        raise HTTPException(status_code=500, detail="Failed to update profile")
+
+@router.post("/profile/upload-image", response_model=UploadImageResponse)
+async def upload_profile_image(
+    payload: UploadImageRequest,
+    current_user: User = Depends(get_current_user),
+    request: Request = None
+):
+    """
+    Upload profile image
+    """
+    try:
+        request_id = str(uuid.uuid4())
+        client_info = get_client_info(request) if request else {}
+        
+        # Save profile image
+        profile_image_url = save_profile_image(payload.image, current_user.id)
+        
+        if not profile_image_url:
+            raise HTTPException(status_code=500, detail="Failed to save image")
+        
+        # Update user profile with new image URL
+        with Session(engine) as session:
+            user = session.exec(
+                select(User).where(User.id == current_user.id)
+            ).first()
+            
+            if user:
+                user.profile_image_url = profile_image_url
+                user.updated_at = datetime.utcnow()
+                session.add(user)
+                session.commit()
+        
+        # Audit logging
+        audit_log('profile_image_upload', current_user.phone, current_user.id, request_id, 
+                 client_info.get('ip_address'), success=True)
+        
+        return UploadImageResponse(
+            success=True,
+            message="Image uploaded successfully",
+            data={
+                "image_url": profile_image_url
+            }
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error uploading profile image for user {current_user.id}: {e}")
+        raise HTTPException(status_code=500, detail="Failed to upload image")
+
+@router.delete("/profile/delete-image", response_model=DeleteImageResponse)
+async def delete_profile_image(
+    current_user: User = Depends(get_current_user),
+    request: Request = None
+):
+    """
+    Delete profile image
+    """
+    try:
+        request_id = str(uuid.uuid4())
+        client_info = get_client_info(request) if request else {}
+        
+        # Remove profile image from user
+        with Session(engine) as session:
+            user = session.exec(
+                select(User).where(User.id == current_user.id)
+            ).first()
+            
+            if user and user.profile_image_url:
+                # Delete the actual file if it exists
+                try:
+                    if os.path.exists(user.profile_image_url):
+                        os.remove(user.profile_image_url)
+                except Exception as e:
+                    logger.warning(f"Failed to delete image file: {e}")
+                
+                # Update user record
+                user.profile_image_url = None
+                user.updated_at = datetime.utcnow()
+                session.add(user)
+                session.commit()
+        
+        # Audit logging
+        audit_log('profile_image_delete', current_user.phone, current_user.id, request_id, 
+                 client_info.get('ip_address'), success=True)
+        
+        return DeleteImageResponse(
+            success=True,
+            message="Image deleted successfully"
+        )
+        
+    except Exception as e:
+        logger.error(f"Error deleting profile image for user {current_user.id}: {e}")
+        raise HTTPException(status_code=500, detail="Failed to delete image")
 
 # Legacy endpoints for backward compatibility
 @router.get("/ping")

@@ -28,6 +28,7 @@ class LoginResponse(BaseModel):
 
 class RegisterRequest(BaseModel):
     name: str = Field(..., min_length=2, max_length=100, description="User's full name")
+    username: Optional[str] = Field(None, min_length=3, max_length=50, description="Unique username (3-50 characters, alphanumeric and underscores only)")
     phone: str = Field(..., description="Phone number with country code (e.g., +1234567890)")
     age: Optional[int] = Field(None, ge=1, le=120, description="User's age")
     profile_image: Optional[str] = Field(None, description="Profile image (base64 encoded, file path, or data URL)")
@@ -38,6 +39,24 @@ class RegisterRequest(BaseModel):
         if not re.match(r'^[a-zA-Z\s\-]+$', v):
             raise ValueError('Name can only contain letters, spaces, and hyphens')
         return v.strip()
+
+    @validator('username')
+    def validate_username(cls, v):
+        if v is not None:
+            # Check if username contains only alphanumeric characters and underscores
+            if not re.match(r'^[a-zA-Z0-9_]+$', v):
+                raise ValueError('Username can only contain letters, numbers, and underscores')
+            
+            # Check if username starts with a letter
+            if not re.match(r'^[a-zA-Z]', v):
+                raise ValueError('Username must start with a letter')
+            
+            # Check if username is not all underscores
+            if v.replace('_', '') == '':
+                raise ValueError('Username cannot be all underscores')
+            
+            return v.lower().strip()
+        return v
 
     @validator('phone')
     def validate_phone(cls, v):
@@ -183,6 +202,7 @@ class ResendOTPResponse(BaseModel):
 class UserResponse(BaseModel):
     id: str
     name: str
+    username: Optional[str] = None
     phone: str
     age: Optional[int] = None
     profile_image_url: Optional[str] = None
@@ -362,6 +382,148 @@ class ErrorResponse(BaseModel):
     message: str
     error: str
     status_code: Optional[int] = None
+
+# =========================
+# Profile Management Schemas
+# =========================
+class UpdateProfileRequest(BaseModel):
+    name: Optional[str] = Field(None, min_length=2, max_length=100, description="User's full name")
+    username: Optional[str] = Field(None, min_length=3, max_length=50, description="Unique username (3-50 characters, alphanumeric and underscores only)")
+    age: Optional[int] = Field(None, ge=1, le=120, description="User's age")
+    profile_image: Optional[str] = Field(None, description="Profile image (base64 encoded, file path, or data URL)")
+    date_of_birth: Optional[str] = Field(None, description="Date of birth in YYYY-MM-DD format")
+
+    @validator('name')
+    def validate_name(cls, v):
+        if v is not None:
+            if not re.match(r'^[a-zA-Z\s\-]+$', v):
+                raise ValueError('Name can only contain letters, spaces, and hyphens')
+            return v.strip()
+        return v
+
+    @validator('username')
+    def validate_username(cls, v):
+        if v is not None:
+            # Check if username contains only alphanumeric characters and underscores
+            if not re.match(r'^[a-zA-Z0-9_]+$', v):
+                raise ValueError('Username can only contain letters, numbers, and underscores')
+            
+            # Check if username starts with a letter
+            if not re.match(r'^[a-zA-Z]', v):
+                raise ValueError('Username must start with a letter')
+            
+            # Check if username is not all underscores
+            if v.replace('_', '') == '':
+                raise ValueError('Username cannot be all underscores')
+            
+            return v.lower().strip()
+        return v
+
+    @validator('age')
+    def validate_age(cls, v):
+        if v is not None and (v < 1 or v > 120):
+            raise ValueError('Age must be between 1 and 120')
+        return v
+
+    @validator('date_of_birth')
+    def validate_date_of_birth(cls, v):
+        if v is not None:
+            try:
+                dob = datetime.strptime(v, '%Y-%m-%d')
+                if dob > datetime.now():
+                    raise ValueError('Date of birth cannot be in the future')
+                if (datetime.now() - dob).days > 43800:  # 120 years
+                    raise ValueError('Date of birth is too far in the past')
+            except ValueError as e:
+                if 'Date of birth' in str(e):
+                    raise e
+                raise ValueError('Invalid date format. Use YYYY-MM-DD')
+        return v
+
+    @validator('profile_image')
+    def validate_profile_image(cls, v):
+        if v is not None:
+            try:
+                # Handle different profile image formats
+                if v.startswith('data:image/'):
+                    # Base64 encoded image with data URL
+                    header, data = v.split(',', 1)
+                    image_data = base64.b64decode(data)
+                elif v.startswith('file://'):
+                    # File path from mobile app - we'll handle this in the backend
+                    # For now, just validate it's a valid file path
+                    if not v.endswith(('.jpg', '.jpeg', '.png', '.webp')):
+                        raise ValueError('Profile image must be a valid image file (JPG, PNG, WebP)')
+                    return v  # Return as-is for backend processing
+                elif v.startswith('/'):
+                    # Absolute file path
+                    if not v.endswith(('.jpg', '.jpeg', '.png', '.webp')):
+                        raise ValueError('Profile image must be a valid image file (JPG, PNG, WebP)')
+                    return v  # Return as-is for backend processing
+                else:
+                    # Try to decode as base64 without data URL prefix
+                    try:
+                        image_data = base64.b64decode(v)
+                    except:
+                        raise ValueError('Profile image must be a valid base64 encoded image or file path')
+                
+                # Check file size (5MB limit) for base64 images
+                if len(image_data) > 5 * 1024 * 1024:
+                    raise ValueError('Profile image size must be less than 5MB')
+                
+                # Validate image format for base64 images
+                image = Image.open(io.BytesIO(image_data))
+                if image.format not in ['JPEG', 'PNG', 'WEBP']:
+                    raise ValueError('Profile image must be JPEG, PNG, or WebP format')
+                
+            except Exception as e:
+                if 'Profile image' in str(e):
+                    raise e
+                raise ValueError('Invalid profile image format')
+        return v
+
+class UpdateProfileResponse(BaseModel):
+    success: bool
+    message: str
+    data: Dict[str, Any]
+
+class UploadImageRequest(BaseModel):
+    image: str = Field(..., description="Base64 encoded image")
+
+    @validator('image')
+    def validate_image(cls, v):
+        try:
+            if v.startswith('data:image/'):
+                # Base64 encoded image with data URL
+                header, data = v.split(',', 1)
+                image_data = base64.b64decode(data)
+            else:
+                # Try to decode as base64 without data URL prefix
+                image_data = base64.b64decode(v)
+            
+            # Check file size (5MB limit)
+            if len(image_data) > 5 * 1024 * 1024:
+                raise ValueError('Image size must be less than 5MB')
+            
+            # Validate image format
+            image = Image.open(io.BytesIO(image_data))
+            if image.format not in ['JPEG', 'PNG', 'WEBP']:
+                raise ValueError('Image must be JPEG, PNG, or WebP format')
+            
+        except Exception as e:
+            if 'Image' in str(e):
+                raise e
+            raise ValueError('Invalid image format')
+        return v
+
+class UploadImageResponse(BaseModel):
+    success: bool
+    message: str
+    data: Dict[str, Any]
+
+class DeleteImageResponse(BaseModel):
+    success: bool
+    message: str
 
 # =========================
 # Legacy Schemas (for backward compatibility)
