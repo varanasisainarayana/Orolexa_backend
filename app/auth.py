@@ -567,7 +567,7 @@ def save_profile_image(profile_image: str, user_id: str) -> str:
             # Base64 encoded image with data URL
             header, data = profile_image.split(',', 1)
             image_data = base64.b64decode(data)
-            
+        
             # Save image
             with open(file_path, "wb") as f:
                 f.write(image_data)
@@ -801,19 +801,10 @@ async def register(payload: RegisterRequest, request: Request):
         
         # Save user data to database
         with Session(engine) as session:
-            # Check if username is already taken (if provided)
-            if payload.username:
-                existing_user = session.exec(
-                    select(User).where(User.username == payload.username)
-                ).first()
-                if existing_user:
-                    raise HTTPException(status_code=400, detail="Username already taken")
-            
             # Create user (will be activated after OTP verification)
             user = User(
                 id=user_id,
                 name=payload.name,
-                username=payload.username,
                 phone=payload.phone,
                 country_code=extract_country_code(payload.phone),
                 age=payload.age,
@@ -921,7 +912,7 @@ async def verify_otp(payload: VerifyOTPRequest):
         user_response = UserResponse(
             id=user.id,
             name=user.name,
-            username=user.username,
+            
             phone=user.phone,
             age=user.age,
             profile_image_url=user.profile_image_url,
@@ -1099,7 +1090,7 @@ async def get_profile(current_user: User = Depends(get_current_user)):
         return UserResponse(
             id=current_user.id,
             name=current_user.name,
-            username=current_user.username,
+
             phone=current_user.phone,
             age=current_user.age,
             profile_image_url=current_user.profile_image_url,
@@ -1137,14 +1128,7 @@ async def update_profile(
             # Update fields if provided
             if payload.name is not None:
                 user.name = payload.name
-            if payload.username is not None:
-                # Check if username is already taken by another user
-                existing_user = session.exec(
-                    select(User).where(User.username == payload.username, User.id != user.id)
-                ).first()
-                if existing_user:
-                    raise HTTPException(status_code=400, detail="Username already taken")
-                user.username = payload.username
+
             if payload.age is not None:
                 user.age = payload.age
             if payload.date_of_birth is not None:
@@ -1178,7 +1162,7 @@ async def update_profile(
                 "user": UserResponse(
                     id=user.id,
                     name=user.name,
-                    username=user.username,
+
                     phone=user.phone,
                     age=user.age,
                     profile_image_url=user.profile_image_url,

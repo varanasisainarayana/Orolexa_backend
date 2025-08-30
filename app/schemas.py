@@ -28,7 +28,6 @@ class LoginResponse(BaseModel):
 
 class RegisterRequest(BaseModel):
     name: str = Field(..., min_length=2, max_length=100, description="User's full name")
-    username: Optional[str] = Field(None, min_length=3, max_length=50, description="Unique username (3-50 characters, alphanumeric and underscores only)")
     phone: str = Field(..., description="Phone number with country code (e.g., +1234567890)")
     age: Optional[int] = Field(None, ge=1, le=120, description="User's age")
     profile_image: Optional[str] = Field(None, description="Profile image (base64 encoded, file path, or data URL)")
@@ -39,24 +38,6 @@ class RegisterRequest(BaseModel):
         if not re.match(r'^[a-zA-Z\s\-]+$', v):
             raise ValueError('Name can only contain letters, spaces, and hyphens')
         return v.strip()
-
-    @validator('username')
-    def validate_username(cls, v):
-        if v is not None:
-            # Check if username contains only alphanumeric characters and underscores
-            if not re.match(r'^[a-zA-Z0-9_]+$', v):
-                raise ValueError('Username can only contain letters, numbers, and underscores')
-            
-            # Check if username starts with a letter
-            if not re.match(r'^[a-zA-Z]', v):
-                raise ValueError('Username must start with a letter')
-            
-            # Check if username is not all underscores
-            if v.replace('_', '') == '':
-                raise ValueError('Username cannot be all underscores')
-            
-            return v.lower().strip()
-        return v
 
     @validator('phone')
     def validate_phone(cls, v):
@@ -202,7 +183,6 @@ class ResendOTPResponse(BaseModel):
 class UserResponse(BaseModel):
     id: str
     name: str
-    username: Optional[str] = None
     phone: str
     age: Optional[int] = None
     profile_image_url: Optional[str] = None
@@ -388,7 +368,6 @@ class ErrorResponse(BaseModel):
 # =========================
 class UpdateProfileRequest(BaseModel):
     name: Optional[str] = Field(None, min_length=2, max_length=100, description="User's full name")
-    username: Optional[str] = Field(None, min_length=3, max_length=50, description="Unique username (3-50 characters, alphanumeric and underscores only)")
     age: Optional[int] = Field(None, ge=1, le=120, description="User's age")
     profile_image: Optional[str] = Field(None, description="Profile image (base64 encoded, file path, or data URL)")
     date_of_birth: Optional[str] = Field(None, description="Date of birth in YYYY-MM-DD format")
@@ -399,24 +378,6 @@ class UpdateProfileRequest(BaseModel):
             if not re.match(r'^[a-zA-Z\s\-]+$', v):
                 raise ValueError('Name can only contain letters, spaces, and hyphens')
             return v.strip()
-        return v
-
-    @validator('username')
-    def validate_username(cls, v):
-        if v is not None:
-            # Check if username contains only alphanumeric characters and underscores
-            if not re.match(r'^[a-zA-Z0-9_]+$', v):
-                raise ValueError('Username can only contain letters, numbers, and underscores')
-            
-            # Check if username starts with a letter
-            if not re.match(r'^[a-zA-Z]', v):
-                raise ValueError('Username must start with a letter')
-            
-            # Check if username is not all underscores
-            if v.replace('_', '') == '':
-                raise ValueError('Username cannot be all underscores')
-            
-            return v.lower().strip()
         return v
 
     @validator('age')
