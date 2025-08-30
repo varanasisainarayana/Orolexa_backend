@@ -7,7 +7,7 @@ from .schemas import (
     LoginRequest, LoginResponse, RegisterRequest, RegisterResponse,
     VerifyOTPRequest, VerifyOTPResponse, ResendOTPRequest, ResendOTPResponse,
     UserResponse, AuthResponse, ErrorResponse, UpdateProfileRequest, UpdateProfileResponse,
-    UploadImageRequest, UploadImageResponse, DeleteImageResponse
+    UploadImageRequest, UploadImageResponse, DeleteImageResponse, DeleteAccountRequest, DeleteAccountResponse
 )
 from .utils import create_jwt_token, create_refresh_token, decode_jwt_token
 from twilio.rest import Client
@@ -568,7 +568,7 @@ def save_profile_image(profile_image: str, user_id: str) -> str:
             header, data = profile_image.split(',', 1)
             image_data = base64.b64decode(data)
         
-            # Save image
+        # Save image
             with open(file_path, "wb") as f:
                 f.write(image_data)
                 
@@ -1272,6 +1272,73 @@ async def delete_profile_image(
     except Exception as e:
         logger.error(f"Error deleting profile image for user {current_user.id}: {e}")
         raise HTTPException(status_code=500, detail="Failed to delete image")
+
+@router.delete("/account/delete", response_model=DeleteAccountResponse)
+async def delete_account(
+    payload: DeleteAccountRequest,
+    current_user: User = Depends(get_current_user),
+    request: Request = None
+):
+    """
+    Delete user account and all associated data
+    """
+    try:
+        request_id = str(uuid.uuid4())
+        client_info = get_client_info(request) if request else {}
+        
+        # Delete user data from database
+        with Session(engine) as session:
+            user = session.exec(
+                select(User).where(User.id == current_user.id)
+            ).first()
+            
+            if not user:
+                raise HTTPException(status_code=404, detail="User not found")
+            
+            # Delete profile image if exists
+            if user.profile_image_url:
+                try:
+                    if os.path.exists(user.profile_image_url):
+                        os.remove(user.profile_image_url)
+                except Exception as e:
+                    logger.warning(f"Failed to delete profile image file: {e}")
+            
+            # Delete user sessions
+            user_sessions = session.exec(
+                select(UserSession).where(UserSession.user_id == user.id)
+            ).all()
+            for session_record in user_sessions:
+                session.delete(session_record)
+            
+            # Delete OTP codes
+            otp_codes = session.exec(
+                select(OTPCode).where(OTPCode.phone == user.phone)
+            ).all()
+            for otp_code in otp_codes:
+                session.delete(otp_code)
+            
+            # Delete user
+            session.delete(user)
+            session.commit()
+        
+        # Audit logging
+        audit_log('account_deleted', user.phone, user.id, request_id, 
+                 client_info.get('ip_address'), success=True)
+        
+        return DeleteAccountResponse(
+            success=True,
+            message="Account deleted successfully",
+            data={
+                "deleted_at": datetime.utcnow().isoformat(),
+                "user_id": user.id
+            }
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error deleting account for user {current_user.id}: {e}")
+        raise HTTPException(status_code=500, detail="Failed to delete account")
 
 # Legacy endpoints for backward compatibility
 @router.get("/ping")

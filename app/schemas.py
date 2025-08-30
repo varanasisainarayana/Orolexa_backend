@@ -486,6 +486,20 @@ class DeleteImageResponse(BaseModel):
     success: bool
     message: str
 
+class DeleteAccountRequest(BaseModel):
+    password_confirmation: str = Field(..., description="Type 'DELETE' to confirm account deletion")
+    
+    @validator('password_confirmation')
+    def validate_confirmation(cls, v):
+        if v != 'DELETE':
+            raise ValueError('Please type DELETE to confirm account deletion')
+        return v
+
+class DeleteAccountResponse(BaseModel):
+    success: bool
+    message: str
+    data: Optional[Dict[str, Any]] = None
+
 # =========================
 # Legacy Schemas (for backward compatibility)
 # =========================
