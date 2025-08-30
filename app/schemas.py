@@ -30,7 +30,7 @@ class RegisterRequest(BaseModel):
     name: str = Field(..., min_length=2, max_length=100, description="User's full name")
     phone: str = Field(..., description="Phone number with country code (e.g., +1234567890)")
     age: Optional[int] = Field(None, ge=1, le=120, description="User's age")
-    profile_image: Optional[str] = Field(None, description="Base64 encoded profile image")
+    profile_image: Optional[str] = Field(None, description="Profile image (base64 encoded, file path, or data URL)")
     date_of_birth: Optional[str] = Field(None, description="Date of birth in YYYY-MM-DD format")
 
     @validator('name')
@@ -71,19 +71,34 @@ class RegisterRequest(BaseModel):
     def validate_profile_image(cls, v):
         if v is not None:
             try:
-                # Check if it's a valid base64 image
-                if not v.startswith('data:image/'):
-                    raise ValueError('Profile image must be a valid base64 encoded image')
+                # Handle different profile image formats
+                if v.startswith('data:image/'):
+                    # Base64 encoded image with data URL
+                    header, data = v.split(',', 1)
+                    image_data = base64.b64decode(data)
+                elif v.startswith('file://'):
+                    # File path from mobile app - we'll handle this in the backend
+                    # For now, just validate it's a valid file path
+                    if not v.endswith(('.jpg', '.jpeg', '.png', '.webp')):
+                        raise ValueError('Profile image must be a valid image file (JPG, PNG, WebP)')
+                    return v  # Return as-is for backend processing
+                elif v.startswith('/'):
+                    # Absolute file path
+                    if not v.endswith(('.jpg', '.jpeg', '.png', '.webp')):
+                        raise ValueError('Profile image must be a valid image file (JPG, PNG, WebP)')
+                    return v  # Return as-is for backend processing
+                else:
+                    # Try to decode as base64 without data URL prefix
+                    try:
+                        image_data = base64.b64decode(v)
+                    except:
+                        raise ValueError('Profile image must be a valid base64 encoded image or file path')
                 
-                # Extract base64 data
-                header, data = v.split(',', 1)
-                image_data = base64.b64decode(data)
-                
-                # Check file size (5MB limit)
+                # Check file size (5MB limit) for base64 images
                 if len(image_data) > 5 * 1024 * 1024:
                     raise ValueError('Profile image size must be less than 5MB')
                 
-                # Validate image format
+                # Validate image format for base64 images
                 image = Image.open(io.BytesIO(image_data))
                 if image.format not in ['JPEG', 'PNG', 'WEBP']:
                     raise ValueError('Profile image must be JPEG, PNG, or WebP format')

@@ -550,13 +550,9 @@ def extract_country_code(phone: str) -> str:
         else:
             return '+1'  # Default to US/Canada if no pattern matches
 
-def save_profile_image(base64_image: str, user_id: str) -> str:
-    """Save base64 profile image and return URL"""
+def save_profile_image(profile_image: str, user_id: str) -> str:
+    """Save profile image and return URL - handles base64 and file paths"""
     try:
-        # Extract base64 data
-        header, data = base64_image.split(',', 1)
-        image_data = base64.b64decode(data)
-        
         # Create uploads directory
         uploads_dir = f"{settings.UPLOAD_DIR}/profiles"
         os.makedirs(uploads_dir, exist_ok=True)
@@ -565,14 +561,47 @@ def save_profile_image(base64_image: str, user_id: str) -> str:
         filename = f"{user_id}.jpg"
         file_path = os.path.join(uploads_dir, filename)
         
-        # Save image
-        with open(file_path, "wb") as f:
-            f.write(image_data)
+        # Handle different image formats
+        if profile_image.startswith('data:image/'):
+            # Base64 encoded image with data URL
+            header, data = profile_image.split(',', 1)
+            image_data = base64.b64decode(data)
+            
+            # Save image
+            with open(file_path, "wb") as f:
+                f.write(image_data)
+                
+        elif profile_image.startswith('file://'):
+            # File path from mobile app - we can't access this directly
+            # For now, we'll skip saving the image and return None
+            # In production, you'd need to implement file upload handling
+            logger.warning(f"File path from mobile app detected: {profile_image}")
+            logger.warning("File upload handling not implemented - skipping profile image")
+            return None
+            
+        elif profile_image.startswith('/'):
+            # Absolute file path - check if file exists
+            if os.path.exists(profile_image):
+                # Copy file to uploads directory
+                shutil.copy2(profile_image, file_path)
+            else:
+                logger.warning(f"File not found: {profile_image}")
+                return None
+        else:
+            # Try to decode as base64 without data URL prefix
+            try:
+                image_data = base64.b64decode(profile_image)
+                with open(file_path, "wb") as f:
+                    f.write(image_data)
+            except:
+                logger.error(f"Invalid profile image format: {profile_image[:50]}...")
+                return None
         
         return file_path
     except Exception as e:
         logger.error(f"Error saving profile image: {e}")
-        raise HTTPException(status_code=500, detail="Failed to save profile image")
+        # Don't fail the registration if image saving fails
+        return None
 
 def cleanup_expired_otps():
     """Clean up expired OTP codes"""
