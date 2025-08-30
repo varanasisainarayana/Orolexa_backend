@@ -1,5 +1,5 @@
 # app/auth.py
-from fastapi import APIRouter, HTTPException, Depends, Request, BackgroundTasks
+from fastapi import APIRouter, HTTPException, Depends, Request, BackgroundTasks, UploadFile, File, Form
 from sqlmodel import Session, select
 from .database import engine
 from .models import User, OTPCode, UserSession
@@ -568,7 +568,7 @@ def save_profile_image(profile_image: str, user_id: str) -> str:
             header, data = profile_image.split(',', 1)
             image_data = base64.b64decode(data)
         
-        # Save image
+            # Save image
             with open(file_path, "wb") as f:
                 f.write(image_data)
                 
@@ -603,6 +603,51 @@ def save_profile_image(profile_image: str, user_id: str) -> str:
         logger.error(f"Error saving profile image: {e}")
         # Don't fail the registration if image saving fails
         return None
+
+def save_uploaded_file(upload_file: UploadFile, user_id: str) -> str:
+    """Save uploaded file and return URL - handles multipart form data"""
+    try:
+        # Validate file type
+        if not upload_file.content_type.startswith('image/'):
+            raise ValueError('File must be an image')
+        
+        # Validate file extension
+        allowed_extensions = {'.jpg', '.jpeg', '.png', '.webp'}
+        file_extension = os.path.splitext(upload_file.filename)[1].lower()
+        if file_extension not in allowed_extensions:
+            raise ValueError('File must be JPEG, PNG, or WebP format')
+        
+        # Create uploads directory
+        uploads_dir = f"{settings.UPLOAD_DIR}/profiles"
+        os.makedirs(uploads_dir, exist_ok=True)
+        
+        # Generate filename with original extension
+        filename = f"{user_id}{file_extension}"
+        file_path = os.path.join(uploads_dir, filename)
+        
+        # Read and validate file size (5MB limit)
+        file_content = upload_file.file.read()
+        if len(file_content) > 5 * 1024 * 1024:
+            raise ValueError('File size must be less than 5MB')
+        
+        # Validate image format using PIL
+        try:
+            image = Image.open(io.BytesIO(file_content))
+            if image.format not in ['JPEG', 'PNG', 'WEBP']:
+                raise ValueError('Invalid image format')
+        except Exception as e:
+            raise ValueError('Invalid image file')
+        
+        # Save file
+        with open(file_path, "wb") as f:
+            f.write(file_content)
+        
+        logger.info(f"File uploaded successfully: {file_path}")
+        return file_path
+        
+    except Exception as e:
+        logger.error(f"Error saving uploaded file: {e}")
+        raise e
 
 def cleanup_expired_otps():
     """Clean up expired OTP codes"""
@@ -1110,7 +1155,7 @@ async def update_profile(
     request: Request = None
 ):
     """
-    Update current user profile
+    Update current user profile (Legacy JSON endpoint - kept for backward compatibility)
     """
     try:
         request_id = str(uuid.uuid4())
@@ -1162,7 +1207,85 @@ async def update_profile(
                 "user": UserResponse(
                     id=user.id,
                     name=user.name,
+                    
+                    phone=user.phone,
+                    age=user.age,
+                    profile_image_url=user.profile_image_url,
+                    date_of_birth=user.date_of_birth.strftime('%Y-%m-%d') if user.date_of_birth else None,
+                    created_at=user.created_at,
+                    updated_at=user.updated_at
+                ).dict()
+            }
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error updating profile for user {current_user.id}: {e}")
+        raise HTTPException(status_code=500, detail="Failed to update profile")
 
+@router.put("/profile/update-file", response_model=UpdateProfileResponse)
+async def update_profile_with_file(
+    name: Optional[str] = Form(None),
+    age: Optional[int] = Form(None),
+    date_of_birth: Optional[str] = Form(None),
+    file: Optional[UploadFile] = File(None),
+    current_user: User = Depends(get_current_user),
+    request: Request = None
+):
+    """
+    Update current user profile with file upload (Recommended approach)
+    """
+    try:
+        request_id = str(uuid.uuid4())
+        client_info = get_client_info(request) if request else {}
+        
+        # Update user data
+        with Session(engine) as session:
+            user = session.exec(
+                select(User).where(User.id == current_user.id)
+            ).first()
+            
+            if not user:
+                raise HTTPException(status_code=404, detail="User not found")
+            
+            # Update fields if provided
+            if name is not None:
+                user.name = name
+            if age is not None:
+                user.age = age
+            if date_of_birth is not None:
+                user.date_of_birth = datetime.strptime(date_of_birth, '%Y-%m-%d')
+            
+            # Handle profile image update
+            if file is not None:
+                try:
+                    profile_image_url = save_uploaded_file(file, user.id)
+                    user.profile_image_url = profile_image_url
+                except ValueError as e:
+                    raise HTTPException(status_code=400, detail=str(e))
+                except Exception as e:
+                    logger.error(f"Failed to save profile image: {e}")
+                    raise HTTPException(status_code=500, detail="Failed to save image")
+            
+            # Update timestamp
+            user.updated_at = datetime.utcnow()
+            
+            session.add(user)
+            session.commit()
+            session.refresh(user)
+        
+        # Audit logging
+        audit_log('profile_update_file', user.phone, user.id, request_id, 
+                 client_info.get('ip_address'), success=True)
+        
+        return UpdateProfileResponse(
+            success=True,
+            message="Profile updated successfully",
+            data={
+                "user": UserResponse(
+                    id=user.id,
+                    name=user.name,
                     phone=user.phone,
                     age=user.age,
                     profile_image_url=user.profile_image_url,
@@ -1186,7 +1309,7 @@ async def upload_profile_image(
     request: Request = None
 ):
     """
-    Upload profile image
+    Upload profile image (Legacy base64 endpoint - kept for backward compatibility)
     """
     try:
         request_id = str(uuid.uuid4())
@@ -1226,6 +1349,54 @@ async def upload_profile_image(
         raise
     except Exception as e:
         logger.error(f"Error uploading profile image for user {current_user.id}: {e}")
+        raise HTTPException(status_code=500, detail="Failed to upload image")
+
+@router.post("/profile/upload-file", response_model=UploadImageResponse)
+async def upload_profile_file(
+    file: UploadFile = File(..., description="Profile image file"),
+    current_user: User = Depends(get_current_user),
+    request: Request = None
+):
+    """
+    Upload profile image using multipart form data (Recommended approach)
+    """
+    try:
+        request_id = str(uuid.uuid4())
+        client_info = get_client_info(request) if request else {}
+        
+        # Save uploaded file
+        profile_image_url = save_uploaded_file(file, current_user.id)
+        
+        # Update user profile with new image URL
+        with Session(engine) as session:
+            user = session.exec(
+                select(User).where(User.id == current_user.id)
+            ).first()
+            
+            if user:
+                user.profile_image_url = profile_image_url
+                user.updated_at = datetime.utcnow()
+                session.add(user)
+                session.commit()
+        
+        # Audit logging
+        audit_log('profile_file_upload', current_user.phone, current_user.id, request_id, 
+                 client_info.get('ip_address'), success=True)
+        
+        return UploadImageResponse(
+            success=True,
+            message="Image uploaded successfully",
+            data={
+                "image_url": profile_image_url
+            }
+        )
+        
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error uploading profile file for user {current_user.id}: {e}")
         raise HTTPException(status_code=500, detail="Failed to upload image")
 
 @router.delete("/profile/delete-image", response_model=DeleteImageResponse)

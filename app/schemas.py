@@ -449,6 +449,7 @@ class UpdateProfileResponse(BaseModel):
     data: Dict[str, Any]
 
 class UploadImageRequest(BaseModel):
+    """Legacy base64 upload request - kept for backward compatibility"""
     image: str = Field(..., description="Base64 encoded image")
 
     @validator('image')
