@@ -24,14 +24,18 @@ Authorization: Bearer <your_jwt_token>
 
 ### 🔐 Authentication Endpoints
 
-#### 1. Send Registration OTP
+#### 1. Register User
 ```http
-POST /auth/register/send-otp
-Content-Type: multipart/form-data
+POST /api/auth/register
+Content-Type: application/json
 
-mobile_number: "1234567890"
-full_name: "John Doe"
-profile_photo: [File] (optional)
+{
+  "name": "John Doe",
+  "phone": "+1234567890",
+  "age": 25,
+  "profile_image": "data:image/jpeg;base64,..." (optional),
+  "date_of_birth": "1998-01-01" (optional)
+}
 ```
 
 **Response:**
@@ -46,14 +50,15 @@ profile_photo: [File] (optional)
 }
 ```
 
-#### 2. Verify Registration OTP
+#### 2. Verify OTP
 ```http
-POST /auth/register/verify-otp
+POST /api/auth/verify-otp
 Content-Type: application/json
 
 {
-  "mobile_number": "1234567890",
-  "otp_code": "123456"
+  "phone": "+1234567890",
+  "otp": "123456",
+  "flow": "register"
 }
 ```
 
@@ -69,24 +74,25 @@ Content-Type: application/json
 }
 ```
 
-#### 3. Send Login OTP
+#### 3. Login User
 ```http
-POST /auth/login/send-otp
+POST /api/auth/login
 Content-Type: application/json
 
 {
-  "mobile_number": "1234567890"
+  "phone": "+1234567890"
 }
 ```
 
 #### 4. Verify Login OTP
 ```http
-POST /auth/login/verify-otp
+POST /api/auth/verify-otp
 Content-Type: application/json
 
 {
-  "mobile_number": "1234567890",
-  "otp_code": "123456"
+  "phone": "+1234567890",
+  "otp": "123456",
+  "flow": "login"
 }
 ```
 

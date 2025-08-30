@@ -11,22 +11,15 @@ import io
 # =========================
 
 class LoginRequest(BaseModel):
-    phone: str = Field(..., description="Phone number with country code")
-    country_code: str = Field(..., description="Country code")
+    phone: str = Field(..., description="Phone number with country code (e.g., +1234567890)")
 
     @validator('phone')
     def validate_phone(cls, v):
         # Remove any non-digit characters except +
         phone_clean = re.sub(r'[^\d+]', '', v)
         if not re.match(r'^\+\d{1,4}\d{6,14}$', phone_clean):
-            raise ValueError('Invalid phone number format. Must include country code.')
+            raise ValueError('Invalid phone number format. Must include country code (e.g., +1234567890)')
         return phone_clean
-
-    @validator('country_code')
-    def validate_country_code(cls, v):
-        if not re.match(r'^\+\d{1,4}$', v):
-            raise ValueError('Invalid country code format')
-        return v
 
 class LoginResponse(BaseModel):
     success: bool
@@ -35,8 +28,7 @@ class LoginResponse(BaseModel):
 
 class RegisterRequest(BaseModel):
     name: str = Field(..., min_length=2, max_length=100, description="User's full name")
-    phone: str = Field(..., description="Phone number with country code")
-    country_code: str = Field(..., description="Country code")
+    phone: str = Field(..., description="Phone number with country code (e.g., +1234567890)")
     age: Optional[int] = Field(None, ge=1, le=120, description="User's age")
     profile_image: Optional[str] = Field(None, description="Base64 encoded profile image")
     date_of_birth: Optional[str] = Field(None, description="Date of birth in YYYY-MM-DD format")
@@ -51,14 +43,8 @@ class RegisterRequest(BaseModel):
     def validate_phone(cls, v):
         phone_clean = re.sub(r'[^\d+]', '', v)
         if not re.match(r'^\+\d{1,4}\d{6,14}$', phone_clean):
-            raise ValueError('Invalid phone number format. Must include country code.')
+            raise ValueError('Invalid phone number format. Must include country code (e.g., +1234567890)')
         return phone_clean
-
-    @validator('country_code')
-    def validate_country_code(cls, v):
-        if not re.match(r'^\+\d{1,4}$', v):
-            raise ValueError('Invalid country code format')
-        return v
 
     @validator('age')
     def validate_age(cls, v):

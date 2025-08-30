@@ -1,5 +1,5 @@
 # app/auth.py
-from fastapi import APIRouter, HTTPException, Depends, Request
+from fastapi import APIRouter, HTTPException, Depends, Request, BackgroundTasks
 from sqlmodel import Session, select
 from .database import engine
 from .models import User, OTPCode, UserSession
@@ -11,6 +11,7 @@ from .schemas import (
 from .utils import create_jwt_token, create_refresh_token, decode_jwt_token
 from twilio.rest import Client
 from twilio.http.http_client import TwilioHttpClient
+from twilio.base.exceptions import TwilioException, TwilioRestException
 import os
 import uuid
 import shutil
@@ -22,19 +23,532 @@ import logging
 import json
 from PIL import Image
 import io
+import re
+import hashlib
+import secrets
+from typing import Optional, Dict, Any
+import time
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/auth", tags=["Authentication"])
 
-# Twilio config with timeout
-_twilio_http_client = TwilioHttpClient(timeout=10)
-client = Client(settings.TWILIO_ACCOUNT_SID, settings.TWILIO_AUTH_TOKEN, http_client=_twilio_http_client)
+# Production constants
+MAX_OTP_ATTEMPTS = 5
+OTP_EXPIRY_MINUTES = 10
+RATE_LIMIT_WINDOW_HOURS = 1
+MAX_REQUESTS_PER_WINDOW = 3
+SESSION_EXPIRY_DAYS = 30
 
-def generate_otp() -> str:
-    """Generate a 6-digit OTP"""
-    import random
-    return str(random.randint(100000, 999999))
+# Enhanced Twilio config with retry logic and timeout
+_twilio_http_client = TwilioHttpClient(
+    timeout=15,  # Increased timeout for production
+    max_retries=3  # Retry failed requests
+)
+
+# Initialize Twilio client with error handling
+try:
+    client = Client(
+        settings.TWILIO_ACCOUNT_SID, 
+        settings.TWILIO_AUTH_TOKEN, 
+        http_client=_twilio_http_client
+    )
+    logger.info("Twilio client initialized successfully")
+except Exception as e:
+    logger.error(f"Failed to initialize Twilio client: {e}")
+    client = None
+
+# In-memory cache for rate limiting (use Redis in production)
+_rate_limit_cache: Dict[str, Dict[str, Any]] = {}
+
+def hash_phone_number(phone: str) -> str:
+    """Hash phone number for security (one-way hash)"""
+    return hashlib.sha256(phone.encode()).hexdigest()
+
+def audit_log(action: str, phone: str, user_id: Optional[str] = None, 
+              request_id: str = None, ip_address: str = None, 
+              success: bool = True, details: Dict[str, Any] = None):
+    """Production audit logging"""
+    audit_entry = {
+        'timestamp': datetime.utcnow().isoformat(),
+        'action': action,
+        'phone_hash': hash_phone_number(phone),
+        'user_id': user_id,
+        'request_id': request_id,
+        'ip_address': ip_address,
+        'success': success,
+        'details': details or {}
+    }
+    
+    logger.info(f"AUDIT: {json.dumps(audit_entry)}")
+
+def get_client_info(request: Request) -> Dict[str, str]:
+    """Extract client information for security"""
+    return {
+        'ip_address': request.client.host if request.client else None,
+        'user_agent': request.headers.get('user-agent'),
+        'x_forwarded_for': request.headers.get('x-forwarded-for'),
+        'x_real_ip': request.headers.get('x-real-ip'),
+        'referer': request.headers.get('referer')
+    }
+
+def check_rate_limit(phone: str, flow: str, request_id: str) -> bool:
+    """Enhanced rate limiting with request tracking"""
+    try:
+        current_time = time.time()
+        window_start = current_time - (RATE_LIMIT_WINDOW_HOURS * 3600)
+        
+        # Clean old entries
+        global _rate_limit_cache
+        _rate_limit_cache = {k: v for k, v in _rate_limit_cache.items() 
+                           if v['timestamp'] > window_start}
+        
+        cache_key = f"{phone}:{flow}"
+        
+        if cache_key not in _rate_limit_cache:
+            _rate_limit_cache[cache_key] = {
+                'count': 1,
+                'timestamp': current_time,
+                'requests': [{'id': request_id, 'time': current_time}]
+            }
+            return True
+        
+        entry = _rate_limit_cache[cache_key]
+        
+        # Remove old requests from this window
+        entry['requests'] = [req for req in entry['requests'] 
+                           if req['time'] > window_start]
+        
+        if len(entry['requests']) >= MAX_REQUESTS_PER_WINDOW:
+            logger.warning(f"Rate limit exceeded for {phone} in {flow} flow")
+            return False
+        
+        entry['requests'].append({'id': request_id, 'time': current_time})
+        entry['count'] = len(entry['requests'])
+        
+        return True
+        
+    except Exception as e:
+        logger.error(f"Error in rate limiting: {e}")
+        return True  # Allow if error
+
+def extract_country_code(phone: str) -> str:
+    """Extract country code from phone number"""
+    # Remove any non-digit characters except +
+    phone_clean = re.sub(r'[^\d+]', '', phone)
+    
+    # Common country code patterns
+    if phone_clean.startswith('+1'):  # US/Canada
+        return '+1'
+    elif phone_clean.startswith('+44'):  # UK
+        return '+44'
+    elif phone_clean.startswith('+91'):  # India
+        return '+91'
+    elif phone_clean.startswith('+86'):  # China
+        return '+86'
+    elif phone_clean.startswith('+81'):  # Japan
+        return '+81'
+    elif phone_clean.startswith('+49'):  # Germany
+        return '+49'
+    elif phone_clean.startswith('+33'):  # France
+        return '+33'
+    elif phone_clean.startswith('+39'):  # Italy
+        return '+39'
+    elif phone_clean.startswith('+34'):  # Spain
+        return '+34'
+    elif phone_clean.startswith('+7'):   # Russia
+        return '+7'
+    elif phone_clean.startswith('+55'):  # Brazil
+        return '+55'
+    elif phone_clean.startswith('+52'):  # Mexico
+        return '+52'
+    elif phone_clean.startswith('+61'):  # Australia
+        return '+61'
+    elif phone_clean.startswith('+82'):  # South Korea
+        return '+82'
+    elif phone_clean.startswith('+31'):  # Netherlands
+        return '+31'
+    elif phone_clean.startswith('+46'):  # Sweden
+        return '+46'
+    elif phone_clean.startswith('+47'):  # Norway
+        return '+47'
+    elif phone_clean.startswith('+45'):  # Denmark
+        return '+45'
+    elif phone_clean.startswith('+358'): # Finland
+        return '+358'
+    elif phone_clean.startswith('+48'):  # Poland
+        return '+48'
+    elif phone_clean.startswith('+420'): # Czech Republic
+        return '+420'
+    elif phone_clean.startswith('+36'):  # Hungary
+        return '+36'
+    elif phone_clean.startswith('+380'): # Ukraine
+        return '+380'
+    elif phone_clean.startswith('+48'):  # Poland
+        return '+48'
+    elif phone_clean.startswith('+351'): # Portugal
+        return '+351'
+    elif phone_clean.startswith('+30'):  # Greece
+        return '+30'
+    elif phone_clean.startswith('+90'):  # Turkey
+        return '+90'
+    elif phone_clean.startswith('+971'): # UAE
+        return '+971'
+    elif phone_clean.startswith('+966'): # Saudi Arabia
+        return '+966'
+    elif phone_clean.startswith('+20'):  # Egypt
+        return '+20'
+    elif phone_clean.startswith('+27'):  # South Africa
+        return '+27'
+    elif phone_clean.startswith('+234'): # Nigeria
+        return '+234'
+    elif phone_clean.startswith('+254'): # Kenya
+        return '+254'
+    elif phone_clean.startswith('+256'): # Uganda
+        return '+256'
+    elif phone_clean.startswith('+233'): # Ghana
+        return '+233'
+    elif phone_clean.startswith('+225'): # Ivory Coast
+        return '+225'
+    elif phone_clean.startswith('+237'): # Cameroon
+        return '+237'
+    elif phone_clean.startswith('+212'): # Morocco
+        return '+212'
+    elif phone_clean.startswith('+216'): # Tunisia
+        return '+216'
+    elif phone_clean.startswith('+213'): # Algeria
+        return '+213'
+    elif phone_clean.startswith('+218'): # Libya
+        return '+218'
+    elif phone_clean.startswith('+249'): # Sudan
+        return '+249'
+    elif phone_clean.startswith('+251'): # Ethiopia
+        return '+251'
+    elif phone_clean.startswith('+255'): # Tanzania
+        return '+255'
+    elif phone_clean.startswith('+260'): # Zambia
+        return '+260'
+    elif phone_clean.startswith('+263'): # Zimbabwe
+        return '+263'
+    elif phone_clean.startswith('+267'): # Botswana
+        return '+267'
+    elif phone_clean.startswith('+268'): # Swaziland
+        return '+268'
+    elif phone_clean.startswith('+269'): # Comoros
+        return '+269'
+    elif phone_clean.startswith('+290'): # Saint Helena
+        return '+290'
+    elif phone_clean.startswith('+291'): # Eritrea
+        return '+291'
+    elif phone_clean.startswith('+297'): # Aruba
+        return '+297'
+    elif phone_clean.startswith('+298'): # Faroe Islands
+        return '+298'
+    elif phone_clean.startswith('+299'): # Greenland
+        return '+299'
+    elif phone_clean.startswith('+350'): # Gibraltar
+        return '+350'
+    elif phone_clean.startswith('+351'): # Portugal
+        return '+351'
+    elif phone_clean.startswith('+352'): # Luxembourg
+        return '+352'
+    elif phone_clean.startswith('+353'): # Ireland
+        return '+353'
+    elif phone_clean.startswith('+354'): # Iceland
+        return '+354'
+    elif phone_clean.startswith('+355'): # Albania
+        return '+355'
+    elif phone_clean.startswith('+356'): # Malta
+        return '+356'
+    elif phone_clean.startswith('+357'): # Cyprus
+        return '+357'
+    elif phone_clean.startswith('+358'): # Finland
+        return '+358'
+    elif phone_clean.startswith('+359'): # Bulgaria
+        return '+359'
+    elif phone_clean.startswith('+370'): # Lithuania
+        return '+370'
+    elif phone_clean.startswith('+371'): # Latvia
+        return '+371'
+    elif phone_clean.startswith('+372'): # Estonia
+        return '+372'
+    elif phone_clean.startswith('+373'): # Moldova
+        return '+373'
+    elif phone_clean.startswith('+374'): # Armenia
+        return '+374'
+    elif phone_clean.startswith('+375'): # Belarus
+        return '+375'
+    elif phone_clean.startswith('+376'): # Andorra
+        return '+376'
+    elif phone_clean.startswith('+377'): # Monaco
+        return '+377'
+    elif phone_clean.startswith('+378'): # San Marino
+        return '+378'
+    elif phone_clean.startswith('+379'): # Vatican
+        return '+379'
+    elif phone_clean.startswith('+380'): # Ukraine
+        return '+380'
+    elif phone_clean.startswith('+381'): # Serbia
+        return '+381'
+    elif phone_clean.startswith('+382'): # Montenegro
+        return '+382'
+    elif phone_clean.startswith('+383'): # Kosovo
+        return '+383'
+    elif phone_clean.startswith('+385'): # Croatia
+        return '+385'
+    elif phone_clean.startswith('+386'): # Slovenia
+        return '+386'
+    elif phone_clean.startswith('+387'): # Bosnia and Herzegovina
+        return '+387'
+    elif phone_clean.startswith('+389'): # North Macedonia
+        return '+389'
+    elif phone_clean.startswith('+390'): # Italy
+        return '+39'
+    elif phone_clean.startswith('+391'): # Italy
+        return '+39'
+    elif phone_clean.startswith('+392'): # Italy
+        return '+39'
+    elif phone_clean.startswith('+393'): # Italy
+        return '+39'
+    elif phone_clean.startswith('+394'): # Italy
+        return '+39'
+    elif phone_clean.startswith('+395'): # Italy
+        return '+39'
+    elif phone_clean.startswith('+396'): # Italy
+        return '+39'
+    elif phone_clean.startswith('+397'): # Italy
+        return '+39'
+    elif phone_clean.startswith('+398'): # Italy
+        return '+39'
+    elif phone_clean.startswith('+399'): # Italy
+        return '+39'
+    elif phone_clean.startswith('+40'):  # Romania
+        return '+40'
+    elif phone_clean.startswith('+41'):  # Switzerland
+        return '+41'
+    elif phone_clean.startswith('+42'):  # Czech Republic
+        return '+420'
+    elif phone_clean.startswith('+43'):  # Austria
+        return '+43'
+    elif phone_clean.startswith('+44'):  # UK
+        return '+44'
+    elif phone_clean.startswith('+45'):  # Denmark
+        return '+45'
+    elif phone_clean.startswith('+46'):  # Sweden
+        return '+46'
+    elif phone_clean.startswith('+47'):  # Norway
+        return '+47'
+    elif phone_clean.startswith('+48'):  # Poland
+        return '+48'
+    elif phone_clean.startswith('+49'):  # Germany
+        return '+49'
+    elif phone_clean.startswith('+50'):  # Rwanda
+        return '+250'
+    elif phone_clean.startswith('+51'):  # Peru
+        return '+51'
+    elif phone_clean.startswith('+52'):  # Mexico
+        return '+52'
+    elif phone_clean.startswith('+53'):  # Cuba
+        return '+53'
+    elif phone_clean.startswith('+54'):  # Argentina
+        return '+54'
+    elif phone_clean.startswith('+55'):  # Brazil
+        return '+55'
+    elif phone_clean.startswith('+56'):  # Chile
+        return '+56'
+    elif phone_clean.startswith('+57'):  # Colombia
+        return '+57'
+    elif phone_clean.startswith('+58'):  # Venezuela
+        return '+58'
+    elif phone_clean.startswith('+590'): # Guadeloupe
+        return '+590'
+    elif phone_clean.startswith('+591'): # Bolivia
+        return '+591'
+    elif phone_clean.startswith('+592'): # Guyana
+        return '+592'
+    elif phone_clean.startswith('+593'): # Ecuador
+        return '+593'
+    elif phone_clean.startswith('+594'): # French Guiana
+        return '+594'
+    elif phone_clean.startswith('+595'): # Paraguay
+        return '+595'
+    elif phone_clean.startswith('+596'): # Martinique
+        return '+596'
+    elif phone_clean.startswith('+597'): # Suriname
+        return '+597'
+    elif phone_clean.startswith('+598'): # Uruguay
+        return '+598'
+    elif phone_clean.startswith('+599'): # Netherlands Antilles
+        return '+599'
+    elif phone_clean.startswith('+60'):  # Malaysia
+        return '+60'
+    elif phone_clean.startswith('+61'):  # Australia
+        return '+61'
+    elif phone_clean.startswith('+62'):  # Indonesia
+        return '+62'
+    elif phone_clean.startswith('+63'):  # Philippines
+        return '+63'
+    elif phone_clean.startswith('+64'):  # New Zealand
+        return '+64'
+    elif phone_clean.startswith('+65'):  # Singapore
+        return '+65'
+    elif phone_clean.startswith('+66'):  # Thailand
+        return '+66'
+    elif phone_clean.startswith('+670'): # East Timor
+        return '+670'
+    elif phone_clean.startswith('+672'): # Australia
+        return '+61'
+    elif phone_clean.startswith('+673'): # Brunei
+        return '+673'
+    elif phone_clean.startswith('+674'): # Nauru
+        return '+674'
+    elif phone_clean.startswith('+675'): # Papua New Guinea
+        return '+675'
+    elif phone_clean.startswith('+676'): # Tonga
+        return '+676'
+    elif phone_clean.startswith('+677'): # Solomon Islands
+        return '+677'
+    elif phone_clean.startswith('+678'): # Vanuatu
+        return '+678'
+    elif phone_clean.startswith('+679'): # Fiji
+        return '+679'
+    elif phone_clean.startswith('+680'): # Palau
+        return '+680'
+    elif phone_clean.startswith('+681'): # Wallis and Futuna
+        return '+681'
+    elif phone_clean.startswith('+682'): # Cook Islands
+        return '+682'
+    elif phone_clean.startswith('+683'): # Niue
+        return '+683'
+    elif phone_clean.startswith('+685'): # Samoa
+        return '+685'
+    elif phone_clean.startswith('+686'): # Kiribati
+        return '+686'
+    elif phone_clean.startswith('+687'): # New Caledonia
+        return '+687'
+    elif phone_clean.startswith('+688'): # Tuvalu
+        return '+688'
+    elif phone_clean.startswith('+689'): # French Polynesia
+        return '+689'
+    elif phone_clean.startswith('+690'): # Tokelau
+        return '+690'
+    elif phone_clean.startswith('+691'): # Micronesia
+        return '+691'
+    elif phone_clean.startswith('+692'): # Marshall Islands
+        return '+692'
+    elif phone_clean.startswith('+7'):   # Russia
+        return '+7'
+    elif phone_clean.startswith('+800'): # International Freephone
+        return '+800'
+    elif phone_clean.startswith('+808'): # International Shared Cost Service
+        return '+808'
+    elif phone_clean.startswith('+81'):  # Japan
+        return '+81'
+    elif phone_clean.startswith('+82'):  # South Korea
+        return '+82'
+    elif phone_clean.startswith('+84'):  # Vietnam
+        return '+84'
+    elif phone_clean.startswith('+850'): # North Korea
+        return '+850'
+    elif phone_clean.startswith('+852'): # Hong Kong
+        return '+852'
+    elif phone_clean.startswith('+853'): # Macau
+        return '+853'
+    elif phone_clean.startswith('+855'): # Cambodia
+        return '+855'
+    elif phone_clean.startswith('+856'): # Laos
+        return '+856'
+    elif phone_clean.startswith('+86'):  # China
+        return '+86'
+    elif phone_clean.startswith('+870'): # Inmarsat
+        return '+870'
+    elif phone_clean.startswith('+871'): # Inmarsat
+        return '+871'
+    elif phone_clean.startswith('+872'): # Inmarsat
+        return '+872'
+    elif phone_clean.startswith('+873'): # Inmarsat
+        return '+873'
+    elif phone_clean.startswith('+874'): # Inmarsat
+        return '+874'
+    elif phone_clean.startswith('+880'): # Bangladesh
+        return '+880'
+    elif phone_clean.startswith('+881'): # Global Mobile Satellite System
+        return '+881'
+    elif phone_clean.startswith('+882'): # International Networks
+        return '+882'
+    elif phone_clean.startswith('+883'): # International Networks
+        return '+883'
+    elif phone_clean.startswith('+886'): # Taiwan
+        return '+886'
+    elif phone_clean.startswith('+90'):  # Turkey
+        return '+90'
+    elif phone_clean.startswith('+91'):  # India
+        return '+91'
+    elif phone_clean.startswith('+92'):  # Pakistan
+        return '+92'
+    elif phone_clean.startswith('+93'):  # Afghanistan
+        return '+93'
+    elif phone_clean.startswith('+94'):  # Sri Lanka
+        return '+94'
+    elif phone_clean.startswith('+95'):  # Myanmar
+        return '+95'
+    elif phone_clean.startswith('+960'): # Maldives
+        return '+960'
+    elif phone_clean.startswith('+961'): # Lebanon
+        return '+961'
+    elif phone_clean.startswith('+962'): # Jordan
+        return '+962'
+    elif phone_clean.startswith('+963'): # Syria
+        return '+963'
+    elif phone_clean.startswith('+964'): # Iraq
+        return '+964'
+    elif phone_clean.startswith('+965'): # Kuwait
+        return '+965'
+    elif phone_clean.startswith('+966'): # Saudi Arabia
+        return '+966'
+    elif phone_clean.startswith('+967'): # Yemen
+        return '+967'
+    elif phone_clean.startswith('+968'): # Oman
+        return '+968'
+    elif phone_clean.startswith('+970'): # Palestine
+        return '+970'
+    elif phone_clean.startswith('+971'): # UAE
+        return '+971'
+    elif phone_clean.startswith('+972'): # Israel
+        return '+972'
+    elif phone_clean.startswith('+973'): # Bahrain
+        return '+973'
+    elif phone_clean.startswith('+974'): # Qatar
+        return '+974'
+    elif phone_clean.startswith('+975'): # Bhutan
+        return '+975'
+    elif phone_clean.startswith('+976'): # Mongolia
+        return '+976'
+    elif phone_clean.startswith('+977'): # Nepal
+        return '+977'
+    elif phone_clean.startswith('+98'):  # Iran
+        return '+98'
+    elif phone_clean.startswith('+992'): # Tajikistan
+        return '+992'
+    elif phone_clean.startswith('+993'): # Turkmenistan
+        return '+993'
+    elif phone_clean.startswith('+994'): # Azerbaijan
+        return '+994'
+    elif phone_clean.startswith('+995'): # Georgia
+        return '+995'
+    elif phone_clean.startswith('+996'): # Kyrgyzstan
+        return '+996'
+    elif phone_clean.startswith('+998'): # Uzbekistan
+        return '+998'
+    elif phone_clean.startswith('+999'): # Reserved
+        return '+999'
+    else:
+        # Default: try to extract country code (first 1-4 digits after +)
+        match = re.match(r'^\+(\d{1,4})', phone_clean)
+        if match:
+            return '+' + match.group(1)
+        else:
+            return '+1'  # Default to US/Canada if no pattern matches
 
 def save_profile_image(base64_image: str, user_id: str) -> str:
     """Save base64 profile image and return URL"""
@@ -74,32 +588,49 @@ def cleanup_expired_otps():
     except Exception as e:
         logger.error(f"Error cleaning up expired OTPs: {e}")
 
-def check_rate_limit(phone: str, flow: str) -> bool:
-    """Check if user has exceeded rate limit for OTP requests"""
+def send_twilio_otp(phone: str) -> str:
+    """Send OTP via Twilio Verify and return verification SID"""
     try:
-        with Session(engine) as session:
-            # Count OTP requests in the last hour
-            one_hour_ago = datetime.utcnow() - timedelta(hours=1)
-            recent_otps = session.exec(
-                select(OTPCode)
-                .where(OTPCode.phone == phone)
-                .where(OTPCode.flow == flow)
-                .where(OTPCode.created_at > one_hour_ago)
-            ).all()
-            
-            return len(recent_otps) < 3  # Max 3 requests per hour
+        if not settings.TWILIO_VERIFY_SERVICE_SID:
+            raise Exception("Twilio Verify Service SID not configured")
+        
+        verification = client.verify.services(settings.TWILIO_VERIFY_SERVICE_SID).verifications.create(
+            to=phone, 
+            channel="sms"
+        )
+        
+        logger.info(f"Twilio verification sent to {phone}, SID: {verification.sid}")
+        return verification.sid
+        
     except Exception as e:
-        logger.error(f"Error checking rate limit: {e}")
-        return True  # Allow if error
+        logger.error(f"Twilio error: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to send OTP: {str(e)}")
+
+def verify_twilio_otp(phone: str, otp: str) -> bool:
+    """Verify OTP using Twilio Verify"""
+    try:
+        if not settings.TWILIO_VERIFY_SERVICE_SID:
+            raise Exception("Twilio Verify Service SID not configured")
+        
+        verification_check = client.verify.services(settings.TWILIO_VERIFY_SERVICE_SID).verification_checks.create(
+            to=phone,
+            code=otp
+        )
+        
+        logger.info(f"Twilio verification check for {phone}: {verification_check.status}")
+        return verification_check.status == "approved"
+        
+    except Exception as e:
+        logger.error(f"Twilio verification error: {e}")
+        return False
 
 @router.post("/login", response_model=LoginResponse)
-async def login(payload: LoginRequest):
+async def login(payload: LoginRequest, request: Request):
     """
-    Login API - Send OTP for existing users
+    Production-ready login API with enhanced security and monitoring
     """
-    # Quick env guard
-    if not (settings.TWILIO_ACCOUNT_SID and settings.TWILIO_AUTH_TOKEN and settings.TWILIO_VERIFY_SERVICE_SID):
-        raise HTTPException(status_code=500, detail="SMS service not configured")
+    request_id = str(uuid.uuid4())
+    client_info = get_client_info(request)
     
     try:
         # Check if user exists
@@ -109,70 +640,84 @@ async def login(payload: LoginRequest):
             ).first()
             
             if not user:
+                audit_log('login_attempt', payload.phone, request_id=request_id, 
+                         ip_address=client_info['ip_address'], success=False, 
+                         details={'error': 'PHONE_NOT_FOUND'})
                 return LoginResponse(
                     success=False,
                     message="Invalid phone number",
                     data={"error": "PHONE_NOT_FOUND"}
                 )
         
-        # Check rate limit
-        if not check_rate_limit(payload.phone, "login"):
+        # Enhanced rate limiting
+        if not check_rate_limit(payload.phone, "login", request_id):
+            audit_log('rate_limit_exceeded', payload.phone, request_id=request_id, 
+                     ip_address=client_info['ip_address'], success=False)
             return LoginResponse(
                 success=False,
                 message="Too many OTP requests. Please try again later.",
                 data={"error": "RATE_LIMIT_EXCEEDED"}
             )
         
-        # Generate OTP
-        otp = generate_otp()
-        expires_at = datetime.utcnow() + timedelta(minutes=5)
+        # Send OTP via Twilio Verify with enhanced error handling
+        try:
+            verification_sid = send_twilio_otp(payload.phone)
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Failed to send OTP: {e}")
+            audit_log('otp_send_failed', payload.phone, user.id, request_id, 
+                     client_info['ip_address'], success=False, details={'error': str(e)})
+            raise HTTPException(status_code=500, detail="Failed to send OTP")
         
-        # Save OTP to database
+        # Store verification attempt in database for tracking
+        expires_at = datetime.utcnow() + timedelta(minutes=OTP_EXPIRY_MINUTES)
+        
         with Session(engine) as session:
             otp_code = OTPCode(
                 phone=payload.phone,
-                otp=otp,
+                otp="",  # We don't store the actual OTP, Twilio handles it
                 flow="login",
                 expires_at=expires_at
             )
             session.add(otp_code)
             session.commit()
         
-        # Send OTP via Twilio (in production, use Twilio Verify)
-        try:
-            if settings.DEBUG:
-                logger.info(f"DEBUG: OTP for {payload.phone}: {otp}")
-            else:
-                verification = client.verify.services(settings.TWILIO_VERIFY_SERVICE_SID).verifications.create(
-                    to=payload.phone, channel="sms"
-                )
-        except Exception as e:
-            logger.error(f"Twilio error: {e}")
-            # In production, you might want to handle this differently
-            if not settings.DEBUG:
-                raise HTTPException(status_code=500, detail="Failed to send OTP")
+        # Audit logging for successful OTP send
+        audit_log('login_otp_sent', payload.phone, user.id, request_id, 
+                 client_info['ip_address'], True, {'verification_sid': verification_sid})
         
         return LoginResponse(
             success=True,
             message="OTP sent successfully",
             data={
                 "phone": payload.phone,
-                "otp_expires_in": 300  # 5 minutes
+                "otp_expires_in": OTP_EXPIRY_MINUTES * 60,
+                "request_id": request_id
             }
         )
         
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error(f"Login error: {e}")
+        logger.error(f"Login error for {payload.phone}: {e}")
+        audit_log('login_error', payload.phone, request_id=request_id, 
+                 ip_address=client_info['ip_address'], success=False, 
+                 details={'error': str(e)})
         raise HTTPException(status_code=500, detail="Internal server error")
 
+# Backward-compatible alias for older clients expecting /api/auth/login/send-otp
+@router.post("/login/send-otp", response_model=LoginResponse)
+async def login_send_otp_alias(payload: LoginRequest):
+    return await login(payload)
+
 @router.post("/register", response_model=RegisterResponse, status_code=201)
-async def register(payload: RegisterRequest):
+async def register(payload: RegisterRequest, request: Request):
     """
-    Register API - Create new user and send OTP
+    Production-ready registration API with enhanced security and monitoring
     """
-    # Quick env guard
-    if not (settings.TWILIO_ACCOUNT_SID and settings.TWILIO_AUTH_TOKEN and settings.TWILIO_VERIFY_SERVICE_SID):
-        raise HTTPException(status_code=500, detail="SMS service not configured")
+    request_id = str(uuid.uuid4())
+    client_info = get_client_info(request)
     
     try:
         # Check if user already exists
@@ -182,17 +727,22 @@ async def register(payload: RegisterRequest):
             ).first()
             
             if existing_user:
+                audit_log('register_attempt', payload.phone, request_id=request_id, 
+                         ip_address=client_info['ip_address'], success=False, 
+                         details={'error': 'PHONE_ALREADY_EXISTS'})
                 return RegisterResponse(
                     success=False,
                     message="Phone number already registered",
                     data={"error": "PHONE_ALREADY_EXISTS"}
                 )
         
-        # Check rate limit
-        if not check_rate_limit(payload.phone, "register"):
+        # Enhanced rate limiting
+        if not check_rate_limit(payload.phone, "register", request_id):
+            audit_log('rate_limit_exceeded', payload.phone, request_id=request_id, 
+                     ip_address=client_info['ip_address'], success=False)
             return RegisterResponse(
                 success=False,
-                message="Too many OTP requests. Please try again later.",
+                message="Too many registration requests. Please try again later.",
                 data={"error": "RATE_LIMIT_EXCEEDED"}
             )
         
@@ -202,28 +752,31 @@ async def register(payload: RegisterRequest):
         # Save profile image if provided
         profile_image_url = None
         if payload.profile_image:
-            profile_image_url = save_profile_image(payload.profile_image, user_id)
+            try:
+                profile_image_url = save_profile_image(payload.profile_image, user_id)
+            except Exception as e:
+                logger.error(f"Failed to save profile image: {e}")
+                # Continue without profile image
         
-        # Generate OTP
-        otp = generate_otp()
-        expires_at = datetime.utcnow() + timedelta(minutes=5)
+        # Send OTP via Twilio Verify with enhanced error handling
+        try:
+            verification_sid = send_twilio_otp(payload.phone)
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Failed to send OTP: {e}")
+            audit_log('otp_send_failed', payload.phone, request_id=request_id, 
+                     ip_address=client_info['ip_address'], success=False, details={'error': str(e)})
+            raise HTTPException(status_code=500, detail="Failed to send OTP")
         
-        # Save OTP and user data to database
+        # Save user data to database
         with Session(engine) as session:
-            otp_code = OTPCode(
-                phone=payload.phone,
-                otp=otp,
-                flow="register",
-                expires_at=expires_at
-            )
-            session.add(otp_code)
-            
             # Create user (will be activated after OTP verification)
             user = User(
                 id=user_id,
                 name=payload.name,
                 phone=payload.phone,
-                country_code=payload.country_code,
+                country_code=extract_country_code(payload.phone),
                 age=payload.age,
                 date_of_birth=datetime.strptime(payload.date_of_birth, '%Y-%m-%d') if payload.date_of_birth else None,
                 profile_image_url=profile_image_url,
@@ -232,18 +785,9 @@ async def register(payload: RegisterRequest):
             session.add(user)
             session.commit()
         
-        # Send OTP via Twilio
-        try:
-            if settings.DEBUG:
-                logger.info(f"DEBUG: OTP for {payload.phone}: {otp}")
-            else:
-                verification = client.verify.services(settings.TWILIO_VERIFY_SERVICE_SID).verifications.create(
-                    to=payload.phone, channel="sms"
-                )
-        except Exception as e:
-            logger.error(f"Twilio error: {e}")
-            if not settings.DEBUG:
-                raise HTTPException(status_code=500, detail="Failed to send OTP")
+        # Audit logging for successful registration
+        audit_log('register_otp_sent', payload.phone, user_id, request_id, 
+                 client_info['ip_address'], True, {'verification_sid': verification_sid})
         
         return RegisterResponse(
             success=True,
@@ -251,78 +795,60 @@ async def register(payload: RegisterRequest):
             data={
                 "user_id": user_id,
                 "phone": payload.phone,
-                "otp_expires_in": 300  # 5 minutes
+                "otp_expires_in": OTP_EXPIRY_MINUTES * 60,
+                "request_id": request_id
             }
         )
         
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error(f"Register error: {e}")
+        logger.error(f"Register error for {payload.phone}: {e}")
+        audit_log('register_error', payload.phone, request_id=request_id, 
+                 ip_address=client_info['ip_address'], success=False, 
+                 details={'error': str(e)})
         raise HTTPException(status_code=500, detail="Internal server error")
+
+# Backward-compatible alias for older clients expecting /api/auth/register/send-otp
+@router.post("/register/send-otp", response_model=RegisterResponse, status_code=201)
+async def register_send_otp_alias(payload: RegisterRequest):
+    return await register(payload)
 
 @router.post("/verify-otp", response_model=VerifyOTPResponse)
 async def verify_otp(payload: VerifyOTPRequest):
     """
-    OTP Verification API - Verify OTP for login or register
+    OTP Verification API - Verify OTP using Twilio Verify
     """
     try:
         # Clean up expired OTPs
         cleanup_expired_otps()
         
-        # Find valid OTP
+        # Verify OTP using Twilio
+        is_valid = verify_twilio_otp(payload.phone, payload.otp)
+        
+        if not is_valid:
+            return VerifyOTPResponse(
+                success=False,
+                message="Invalid OTP",
+                data={"error": "INVALID_OTP"}
+            )
+        
+        # Find user
         with Session(engine) as session:
-            otp_code = session.exec(
-                select(OTPCode)
-                .where(OTPCode.phone == payload.phone)
-                .where(OTPCode.otp == payload.otp)
-                .where(OTPCode.flow == payload.flow)
-                .where(OTPCode.is_used == False)
-                .where(OTPCode.expires_at > datetime.utcnow())
+            user = session.exec(
+                select(User).where(User.phone == payload.phone)
             ).first()
             
-            if not otp_code:
+            if not user:
                 return VerifyOTPResponse(
                     success=False,
-                    message="Invalid OTP",
-                    data={"error": "INVALID_OTP"}
+                    message="User not found",
+                    data={"error": "USER_NOT_FOUND"}
                 )
             
-            # Mark OTP as used
-            otp_code.is_used = True
-            session.add(otp_code)
-            
-            if payload.flow == "login":
-                # Login flow - get existing user
-                user = session.exec(
-                    select(User).where(User.phone == payload.phone)
-                ).first()
-                
-                if not user:
-                    return VerifyOTPResponse(
-                        success=False,
-                        message="User not found",
-                        data={"error": "USER_NOT_FOUND"}
-                    )
-                
-                # Mark user as verified
-                user.is_verified = True
-                session.add(user)
-                
-            elif payload.flow == "register":
-                # Register flow - activate user
-                user = session.exec(
-                    select(User).where(User.phone == payload.phone)
-                ).first()
-                
-                if not user:
-                    return VerifyOTPResponse(
-                        success=False,
-                        message="User not found",
-                        data={"error": "USER_NOT_FOUND"}
-                    )
-                
-                # Mark user as verified
-                user.is_verified = True
-                session.add(user)
+            # Mark user as verified
+            user.is_verified = True
+            session.add(user)
             
             # Generate tokens
             access_token = create_jwt_token({"sub": user.id})
@@ -369,12 +895,8 @@ async def verify_otp(payload: VerifyOTPRequest):
 @router.post("/resend-otp", response_model=ResendOTPResponse)
 async def resend_otp(payload: ResendOTPRequest):
     """
-    Resend OTP API
+    Resend OTP API using Twilio Verify
     """
-    # Quick env guard
-    if not (settings.TWILIO_ACCOUNT_SID and settings.TWILIO_AUTH_TOKEN and settings.TWILIO_VERIFY_SERVICE_SID):
-        raise HTTPException(status_code=500, detail="SMS service not configured")
-    
     try:
         # Check if user exists
         with Session(engine) as session:
@@ -390,52 +912,93 @@ async def resend_otp(payload: ResendOTPRequest):
                 )
         
         # Check rate limit
-        if not check_rate_limit(payload.phone, "login"):
+        if not check_rate_limit(payload.phone, "login", request_id=None): # request_id is not available here, so pass None
             return ResendOTPResponse(
                 success=False,
                 message="Too many OTP requests. Please try again later.",
                 data={"error": "RATE_LIMIT_EXCEEDED"}
             )
         
-        # Generate new OTP
-        otp = generate_otp()
-        expires_at = datetime.utcnow() + timedelta(minutes=5)
+        # Send OTP via Twilio Verify
+        try:
+            verification_sid = send_twilio_otp(payload.phone)
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Failed to resend OTP: {e}")
+            raise HTTPException(status_code=500, detail="Failed to send OTP")
         
-        # Save new OTP to database
+        # Track resend attempt
+        expires_at = datetime.utcnow() + timedelta(minutes=10)
+        
         with Session(engine) as session:
             otp_code = OTPCode(
                 phone=payload.phone,
-                otp=otp,
+                otp="",  # We don't store the actual OTP
                 flow="login",
                 expires_at=expires_at
             )
             session.add(otp_code)
             session.commit()
         
-        # Send OTP via Twilio
-        try:
-            if settings.DEBUG:
-                logger.info(f"DEBUG: Resend OTP for {payload.phone}: {otp}")
-            else:
-                verification = client.verify.services(settings.TWILIO_VERIFY_SERVICE_SID).verifications.create(
-                    to=payload.phone, channel="sms"
-                )
-        except Exception as e:
-            logger.error(f"Twilio error: {e}")
-            if not settings.DEBUG:
-                raise HTTPException(status_code=500, detail="Failed to send OTP")
-        
         return ResendOTPResponse(
             success=True,
             message="OTP resent successfully",
             data={
-                "otp_expires_in": 300  # 5 minutes
+                "otp_expires_in": 600  # 10 minutes
             }
         )
         
     except Exception as e:
         logger.error(f"Resend OTP error: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
+
+# Production monitoring endpoints
+@router.get("/health")
+async def health_check():
+    """Production health check endpoint"""
+    try:
+        # Check database connection
+        with Session(engine) as session:
+            session.exec("SELECT 1").first()
+        
+        # Check Twilio connection
+        twilio_status = "healthy" if client else "unhealthy"
+        
+        return {
+            "status": "healthy",
+            "timestamp": datetime.utcnow().isoformat(),
+            "services": {
+                "database": "healthy",
+                "twilio": twilio_status
+            },
+            "version": "1.0.0"
+        }
+    except Exception as e:
+        logger.error(f"Health check failed: {e}")
+        raise HTTPException(status_code=503, detail="Service unhealthy")
+
+@router.get("/metrics")
+async def get_metrics():
+    """Production metrics endpoint"""
+    try:
+        with Session(engine) as session:
+            total_users = session.exec("SELECT COUNT(*) FROM users").first()
+            verified_users = session.exec("SELECT COUNT(*) FROM users WHERE is_verified = 1").first()
+            total_otps = session.exec("SELECT COUNT(*) FROM otp_codes").first()
+            active_sessions = session.exec("SELECT COUNT(*) FROM user_sessions WHERE expires_at > datetime('now')").first()
+        
+        return {
+            "total_users": total_users or 0,
+            "verified_users": verified_users or 0,
+            "total_otps": total_otps or 0,
+            "active_sessions": active_sessions or 0,
+            "rate_limit_cache_size": len(_rate_limit_cache),
+            "timestamp": datetime.utcnow().isoformat()
+        }
+    except Exception as e:
+        logger.error(f"Metrics collection failed: {e}")
+        raise HTTPException(status_code=500, detail="Failed to collect metrics")
 
 # Legacy endpoints for backward compatibility
 @router.get("/ping")

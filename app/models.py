@@ -16,7 +16,7 @@ class User(SQLModel, table=True):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()), primary_key=True)
     name: str = Field(max_length=100)
     phone: str = Field(max_length=20, unique=True, index=True)
-    country_code: str = Field(max_length=5)
+    country_code: Optional[str] = Field(max_length=5, default=None)
     age: Optional[int] = Field(default=None)
     date_of_birth: Optional[datetime] = Field(default=None)
     profile_image_url: Optional[str] = Field(max_length=255, default=None)
