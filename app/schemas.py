@@ -115,28 +115,50 @@ class RegisterResponse(BaseModel):
     data: Dict[str, Any]
 
 class VerifyOTPRequest(BaseModel):
-    phone: str = Field(..., description="Phone number with country code")
-    otp: str = Field(..., min_length=6, max_length=6, description="6-digit OTP")
-    flow: str = Field(..., description="Flow type: 'login' or 'register'")
+    # Support both old production format and new format
+    phone: Optional[str] = Field(None, description="Phone number with country code (new format)")
+    mobile_number: Optional[str] = Field(None, description="Phone number with country code (old format)")
+    otp: Optional[str] = Field(None, description="6-digit OTP (new format)")
+    otp_code: Optional[str] = Field(None, description="6-digit OTP (old format)")
+    flow: Optional[str] = Field(None, description="Flow type: 'login' or 'register'")
 
-    @validator('phone')
+    class Config:
+        # Allow extra fields for backward compatibility
+        extra = "allow"
+
+    @validator('phone', 'mobile_number')
     def validate_phone(cls, v):
-        phone_clean = re.sub(r'[^\d+]', '', v)
-        if not re.match(r'^\+\d{1,4}\d{6,14}$', phone_clean):
-            raise ValueError('Invalid phone number format')
-        return phone_clean
+        if v is not None:
+            phone_clean = re.sub(r'[^\d+]', '', v)
+            if not re.match(r'^\+\d{1,4}\d{6,14}$', phone_clean):
+                raise ValueError('Invalid phone number format')
+            return phone_clean
+        return v
 
-    @validator('otp')
+    @validator('otp', 'otp_code')
     def validate_otp(cls, v):
-        if not v.isdigit() or len(v) != 6:
-            raise ValueError('OTP must be 6 digits')
+        if v is not None:
+            if not v.isdigit() or len(v) != 6:
+                raise ValueError('OTP must be 6 digits')
         return v
 
     @validator('flow')
     def validate_flow(cls, v):
-        if v not in ['login', 'register']:
+        if v is not None and v not in ['login', 'register']:
             raise ValueError('Flow must be either "login" or "register"')
         return v
+
+    def get_phone(self) -> str:
+        """Get phone number from either field"""
+        return self.phone or self.mobile_number
+
+    def get_otp(self) -> str:
+        """Get OTP from either field"""
+        return self.otp or self.otp_code
+
+    def get_flow(self) -> str:
+        """Get flow, default to 'login' if not provided"""
+        return self.flow or 'login'
 
 class VerifyOTPResponse(BaseModel):
     success: bool
@@ -346,10 +368,6 @@ class ErrorResponse(BaseModel):
 # =========================
 class SendOTPRequest(BaseModel):
     mobile_number: str
-
-class VerifyOTPRequest(BaseModel):
-    mobile_number: str
-    otp_code: str
 
 class RegisterVerifyRequest(BaseModel):
     mobile_number: str

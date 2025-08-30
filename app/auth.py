@@ -852,8 +852,20 @@ async def verify_otp(payload: VerifyOTPRequest):
         # Clean up expired OTPs
         cleanup_expired_otps()
         
+        # Get phone and OTP from payload (supports both old and new formats)
+        phone = payload.get_phone()
+        otp = payload.get_otp()
+        flow = payload.get_flow()
+        
+        if not phone or not otp:
+            return VerifyOTPResponse(
+                success=False,
+                message="Missing phone number or OTP",
+                data={"error": "MISSING_REQUIRED_FIELDS"}
+            )
+        
         # Verify OTP using Twilio
-        is_valid = verify_twilio_otp(payload.phone, payload.otp)
+        is_valid = verify_twilio_otp(phone, otp)
         
         if not is_valid:
             return VerifyOTPResponse(
@@ -865,7 +877,7 @@ async def verify_otp(payload: VerifyOTPRequest):
         # Find user
         with Session(engine) as session:
             user = session.exec(
-                select(User).where(User.phone == payload.phone)
+                select(User).where(User.phone == phone)
             ).first()
             
             if not user:
