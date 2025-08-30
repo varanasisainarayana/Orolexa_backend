@@ -1,5 +1,6 @@
 # app/auth.py
 from fastapi import APIRouter, HTTPException, Depends, Request, BackgroundTasks, UploadFile, File, Form
+from fastapi.responses import FileResponse
 from sqlmodel import Session, select
 from .database import engine
 from .models import User, OTPCode, UserSession
@@ -1156,6 +1157,82 @@ async def get_profile(current_user: User = Depends(get_current_user)):
     except Exception as e:
         logger.error(f"Error fetching profile for user {current_user.id}: {e}")
         raise HTTPException(status_code=500, detail="Failed to fetch profile")
+
+@router.get("/profile/image/{user_id}")
+async def get_profile_image(user_id: str, current_user: User = Depends(get_current_user)):
+    """
+    Get profile image for a user (only accessible by the user themselves)
+    """
+    try:
+        # Security: Only allow users to access their own profile image
+        if current_user.id != user_id:
+            raise HTTPException(status_code=403, detail="Access denied")
+        
+        # Get user from database
+        with Session(engine) as session:
+            user = session.exec(
+                select(User).where(User.id == user_id)
+            ).first()
+            
+            if not user:
+                raise HTTPException(status_code=404, detail="User not found")
+            
+            if not user.profile_image_url:
+                raise HTTPException(status_code=404, detail="Profile image not found")
+            
+            # Check if file exists
+            if not os.path.exists(user.profile_image_url):
+                raise HTTPException(status_code=404, detail="Profile image file not found")
+            
+            # Return the image file
+            return FileResponse(
+                user.profile_image_url,
+                media_type="image/jpeg",
+                headers={"Cache-Control": "public, max-age=31536000"}  # Cache for 1 year
+            )
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error serving profile image for user {user_id}: {e}")
+        raise HTTPException(status_code=500, detail="Failed to serve profile image")
+
+@router.get("/images/{filename:path}")
+async def get_image(filename: str):
+    """
+    Get any image from uploads directory (public access)
+    """
+    try:
+        # Construct the file path
+        file_path = os.path.join(settings.UPLOAD_DIR, filename)
+        
+        # Security: Prevent directory traversal
+        if not os.path.abspath(file_path).startswith(os.path.abspath(settings.UPLOAD_DIR)):
+            raise HTTPException(status_code=403, detail="Access denied")
+        
+        # Check if file exists
+        if not os.path.exists(file_path):
+            raise HTTPException(status_code=404, detail="Image not found")
+        
+        # Determine content type based on file extension
+        content_type = "image/jpeg"  # default
+        if filename.lower().endswith('.png'):
+            content_type = "image/png"
+        elif filename.lower().endswith('.webp'):
+            content_type = "image/webp"
+        
+        # Return the image file
+        return FileResponse(
+            file_path,
+            media_type=content_type,
+            headers={"Cache-Control": "public, max-age=31536000"}  # Cache for 1 year
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error serving image {filename}: {e}")
+        raise HTTPException(status_code=500, detail="Failed to serve image")
 
 @router.put("/profile/update", response_model=UpdateProfileResponse)
 async def update_profile(
