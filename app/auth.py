@@ -787,23 +787,30 @@ async def login_send_otp_alias(payload: LoginRequest):
     return await login(payload)
 
 @router.post("/register", response_model=RegisterResponse, status_code=201)
-async def register(payload: RegisterRequest, request: Request):
+async def register(
+    name: str = Form(...),
+    phone: str = Form(...),
+    age: Optional[int] = Form(None),
+    date_of_birth: Optional[str] = Form(None),
+    profile_image: Optional[UploadFile] = File(None),
+    request: Request = None
+):
     """
-    Production-ready registration API with enhanced security and monitoring
+    Production-ready registration API with file upload support for profile image
     """
     request_id = str(uuid.uuid4())
-    client_info = get_client_info(request)
+    client_info = get_client_info(request) if request else {}
     
     try:
         # Check if user already exists
         with Session(engine) as session:
             existing_user = session.exec(
-                select(User).where(User.phone == payload.phone)
+                select(User).where(User.phone == phone)
             ).first()
             
             if existing_user:
-                audit_log('register_attempt', payload.phone, request_id=request_id, 
-                         ip_address=client_info['ip_address'], success=False, 
+                audit_log('register_attempt', phone, request_id=request_id, 
+                         ip_address=client_info.get('ip_address'), success=False, 
                          details={'error': 'PHONE_ALREADY_EXISTS'})
                 return RegisterResponse(
                     success=False,
@@ -812,9 +819,9 @@ async def register(payload: RegisterRequest, request: Request):
                 )
         
         # Enhanced rate limiting
-        if not check_rate_limit(payload.phone, "register", request_id):
-            audit_log('rate_limit_exceeded', payload.phone, request_id=request_id, 
-                     ip_address=client_info['ip_address'], success=False)
+        if not check_rate_limit(phone, "register", request_id):
+            audit_log('rate_limit_exceeded', phone, request_id=request_id, 
+                     ip_address=client_info.get('ip_address'), success=False)
             return RegisterResponse(
                 success=False,
                 message="Too many registration requests. Please try again later.",
@@ -826,22 +833,24 @@ async def register(payload: RegisterRequest, request: Request):
         
         # Save profile image if provided
         profile_image_url = None
-        if payload.profile_image:
+        if profile_image is not None:
             try:
-                profile_image_url = save_profile_image(payload.profile_image, user_id)
+                profile_image_url = save_uploaded_file(profile_image, user_id)
+            except ValueError as e:
+                raise HTTPException(status_code=400, detail=str(e))
             except Exception as e:
                 logger.error(f"Failed to save profile image: {e}")
-                # Continue without profile image
+                raise HTTPException(status_code=500, detail="Failed to save image")
         
         # Send OTP via Twilio Verify with enhanced error handling
         try:
-            verification_sid = send_twilio_otp(payload.phone)
+            verification_sid = send_twilio_otp(phone)
         except HTTPException:
             raise
         except Exception as e:
             logger.error(f"Failed to send OTP: {e}")
-            audit_log('otp_send_failed', payload.phone, request_id=request_id, 
-                     ip_address=client_info['ip_address'], success=False, details={'error': str(e)})
+            audit_log('otp_send_failed', phone, request_id=request_id, 
+                     ip_address=client_info.get('ip_address'), success=False, details={'error': str(e)})
             raise HTTPException(status_code=500, detail="Failed to send OTP")
         
         # Save user data to database
@@ -849,11 +858,11 @@ async def register(payload: RegisterRequest, request: Request):
             # Create user (will be activated after OTP verification)
             user = User(
                 id=user_id,
-                name=payload.name,
-                phone=payload.phone,
-                country_code=extract_country_code(payload.phone),
-                age=payload.age,
-                date_of_birth=datetime.strptime(payload.date_of_birth, '%Y-%m-%d') if payload.date_of_birth else None,
+                name=name,
+                phone=phone,
+                country_code=extract_country_code(phone),
+                age=age,
+                date_of_birth=datetime.strptime(date_of_birth, '%Y-%m-%d') if date_of_birth else None,
                 profile_image_url=profile_image_url,
                 is_verified=False
             )
@@ -861,15 +870,15 @@ async def register(payload: RegisterRequest, request: Request):
             session.commit()
         
         # Audit logging for successful registration
-        audit_log('register_otp_sent', payload.phone, user_id, request_id, 
-                 client_info['ip_address'], True, {'verification_sid': verification_sid})
+        audit_log('register_otp_sent', phone, user_id, request_id, 
+                 client_info.get('ip_address'), True, {'verification_sid': verification_sid})
         
         return RegisterResponse(
             success=True,
             message="Registration successful. OTP sent for verification.",
             data={
                 "user_id": user_id,
-                "phone": payload.phone,
+                "phone": phone,
                 "otp_expires_in": OTP_EXPIRY_MINUTES * 60,
                 "request_id": request_id
             }
@@ -878,9 +887,9 @@ async def register(payload: RegisterRequest, request: Request):
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Register error for {payload.phone}: {e}")
-        audit_log('register_error', payload.phone, request_id=request_id, 
-                 ip_address=client_info['ip_address'], success=False, 
+        logger.error(f"Register error for {phone}: {e}")
+        audit_log('register_error', phone, request_id=request_id, 
+                 ip_address=client_info.get('ip_address'), success=False, 
                  details={'error': str(e)})
         raise HTTPException(status_code=500, detail="Internal server error")
 
