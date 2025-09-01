@@ -1,5 +1,5 @@
 import os
-from fastapi import FastAPI, HTTPException, Depends, File, UploadFile
+from fastapi import FastAPI, HTTPException, Depends, File, UploadFile, Request
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.trustedhost import TrustedHostMiddleware
@@ -12,6 +12,7 @@ import shutil
 import mimetypes
 import google.generativeai as genai
 from sqlmodel import Session, select
+import logging
 
 from . import auth
 from .database import create_db_and_tables, get_session
@@ -34,11 +35,33 @@ from .schemas import (
     ESP32SessionResponse, ESP32ImageUploadRequest, ESP32ImageUploadResponse
 )
 
-# Load environment variables
-load_dotenv()
+# Configure logging
+logging.basicConfig(
+    level=getattr(logging, settings.LOG_LEVEL),
+    format=settings.LOG_FORMAT
+)
+logger = logging.getLogger(__name__)
 
 # Configure Gemini API
-genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
+genai.configure(api_key=settings.GEMINI_API_KEY)
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup
+    logger.info("Starting Dental AI API...")
+    app.state.db_init_ok = True
+    app.state.db_init_error = None
+    try:
+        create_db_and_tables()
+        logger.info("Database initialized successfully")
+    except Exception as e:
+        # Do not crash the app; report via health endpoint
+        app.state.db_init_ok = False
+        app.state.db_init_error = str(e)
+        logger.exception("Database initialization failed")
+    yield
+    # Shutdown
+    logger.info("Shutting down Dental AI API...")
 
 # Validate essential envs in production
 if not DEBUG and not os.getenv("GEMINI_API_KEY"):
@@ -46,7 +69,27 @@ if not DEBUG and not os.getenv("GEMINI_API_KEY"):
     pass
 
 # Initialize FastAPI
-app = FastAPI(title="Dental AI API")
+app = FastAPI(
+    title=settings.APP_NAME,
+    version=settings.APP_VERSION,
+    debug=settings.DEBUG,
+    lifespan=lifespan,
+    docs_url=("/docs" if settings.DOCS_ENABLED else None),
+    redoc_url=("/redoc" if settings.DOCS_ENABLED else None),
+    openapi_url=("/openapi.json" if settings.DOCS_ENABLED else None)
+)
+
+# Add custom exception handler
+app.add_exception_handler(HTTPException, http_exception_handler)
+
+# Add middleware
+app.add_middleware(ErrorHandlingMiddleware)
+app.add_middleware(LoggingMiddleware)
+app.add_middleware(SecurityMiddleware)
+app.add_middleware(RateLimitMiddleware)
+
+# GZip compression
+app.add_middleware(GZipMiddleware, minimum_size=settings.GZIP_MIN_SIZE)
 
 # Add CORS middleware
 app.add_middleware(
@@ -118,15 +161,77 @@ async def esp32_rate_limit(request: Request, current_user: int = Depends(lambda 
     return current_user
 
 # Auth scheme
-oauth2_scheme = HTTPBearer()
+oauth2_scheme = HTTPBearer(auto_error=False)
+
+# Dependency to get current user from JWT
+def get_current_user(request: Request, credentials: HTTPAuthorizationCredentials = Depends(oauth2_scheme)):
+    token = None
+    if credentials and credentials.credentials:
+        token = credentials.credentials
+    else:
+        # Fallback to cookie
+        token = request.cookies.get("access_token")
+    if not token:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    logger.info(f"Processing JWT token for authentication")
+    payload = decode_jwt_token(token)
+    if not payload:
+        logger.warning("JWT token decode failed - invalid or expired token")
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    
+    user_id = payload.get("sub")
+    if not user_id:
+        logger.warning("JWT token missing user ID")
+        raise HTTPException(status_code=401, detail="Invalid token: missing user ID")
+    
+    logger.info(f"Successfully authenticated user ID: {user_id}")
+    return user_id
 
 # Include authentication router
 app.include_router(auth.router)
 
-# DB setup on startup
-@app.on_event("startup")
-def on_startup():
-    create_db_and_tables()
+# Include all routers
+from . import analysis
+from . import doctors
+from . import appointments
+from . import notifications
+from . import devices
+from . import health_analytics
+from . import settings as settings_router
+from . import streaming
+
+app.include_router(analysis.router)
+app.include_router(doctors.router)
+app.include_router(appointments.router)
+app.include_router(notifications.router)
+app.include_router(devices.router)
+app.include_router(health_analytics.router)
+app.include_router(settings_router.router)
+app.include_router(streaming.router)
+
+# Health check endpoint
+@app.get("/health")
+def health_check():
+    return {
+        "status": "healthy" if getattr(app.state, "db_init_ok", True) else "degraded",
+        "service": settings.APP_NAME,
+        "version": settings.APP_VERSION,
+        "timestamp": datetime.utcnow().isoformat(),
+        "environment": "railway" if settings.RAILWAY_ENVIRONMENT else "local",
+        "port": settings.PORT,
+        "database": {
+            "ok": getattr(app.state, "db_init_ok", True),
+            "error": getattr(app.state, "db_init_error", None)
+        },
+        "auth": {
+            "secret_key_configured": bool(settings.SECRET_KEY and settings.SECRET_KEY != "change-me-in-prod"),
+            "jwt_algorithm": settings.ALGORITHM,
+            "token_expiry_minutes": settings.ACCESS_TOKEN_EXPIRE_MINUTES
+        }
+    }
+
+
+
 
 # Dependency to get current user from JWT
 def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(oauth2_scheme)):
@@ -144,182 +249,87 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(oauth2_
 # ------------------------
 @app.post("/upload-image")
 def upload_image(
-    file1: UploadFile = File(...),
+    file1: UploadFile = File(None),
     file2: UploadFile = File(None),
     file3: UploadFile = File(None),
-    current_user: int = Depends(get_current_user)
+    current_user: str = Depends(get_current_user)
 ):
     try:
-        upload_dir = "uploads"
+        upload_dir = settings.UPLOAD_DIR
         os.makedirs(upload_dir, exist_ok=True)
 
+        files = [f for f in [file1, file2, file3] if f is not None]
+        if not files:
+            raise HTTPException(status_code=400, detail="At least one file must be uploaded.")
+
         saved_paths = []
-        for f in [file1, file2, file3]:
+        for f in files:
             if not f:
                 continue
+                
+            # Validate file type
+            if f.content_type not in settings.ALLOWED_IMAGE_TYPES:
+                raise HTTPException(status_code=415, detail=f"File type {f.content_type} not allowed")
+                
+            # Validate file size
+            f.file.seek(0, 2)
+            file_size = f.file.tell()
+            f.file.seek(0)
+            
+            if file_size > settings.MAX_FILE_SIZE:
+                raise HTTPException(status_code=413, detail=f"File too large (max {settings.MAX_FILE_SIZE // (1024*1024)}MB)")
+            
             path = os.path.join(upload_dir, f"{datetime.utcnow().timestamp()}_{f.filename}")
             with open(path, "wb") as buffer:
                 shutil.copyfileobj(f.file, buffer)
             saved_paths.append(path)
 
         return {
-            "message": "Image(s) uploaded successfully",
-            "file_paths": saved_paths,
-            "uploaded_by": current_user
+            "success": True,
+            "data": {
+                "message": "Images uploaded successfully",
+                "file_paths": saved_paths,
+                "uploaded_by": current_user,
+                "total_images": len(saved_paths)
+            }
         }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Upload error: {str(e)}")
+        return {
+            "success": False,
+            "error": str(e)
+        }
+
+# Analysis endpoints are now handled by the dedicated analysis router
 
 # ------------------------
-# Analyze Images with Gemini (three inputs, only first required)
+# Redirect old analyze endpoint to new location
 # ------------------------
 @app.post("/analyze-image")
-def analyze_image(
+def redirect_analyze_image(
     file1: UploadFile = File(...),
     file2: UploadFile = File(None),
     file3: UploadFile = File(None),
     current_user: int = Depends(get_current_user),
     session: Session = Depends(get_session)
 ):
-    try:
-        # Verify user exists
-        user = session.exec(select(User).where(User.id == current_user)).first()
-        if not user:
-            raise HTTPException(status_code=404, detail="User not found")
+    """Redirect /analyze-image to /analysis/analyze-images for backward compatibility"""
+    from .analysis import analyze_images
+    return analyze_images(file1, file2, file3, current_user, session)
 
-        analyses = []
-        saved_paths = []
-        
-        # Process each provided file
-        for i, file in enumerate([file1, file2, file3], 1):
-            if not file:
-                continue
-                
-            # Save image
-            upload_dir = "uploads"
-            os.makedirs(upload_dir, exist_ok=True)
-            image_path = os.path.join(upload_dir, f"{datetime.utcnow().timestamp()}_{file.filename}")
-            with open(image_path, "wb") as f:
-                f.write(file.file.read())
-            saved_paths.append(image_path)
-
-            # Detect MIME type
-            mime_type, _ = mimetypes.guess_type(image_path)
-            if not mime_type:
-                mime_type = "image/jpeg"
-
-            # Read image bytes
-            with open(image_path, "rb") as img_file:
-                image_bytes = img_file.read()
-
-            # Gemini analysis
-            model = genai.GenerativeModel("gemini-1.5-flash")
-            result = model.generate_content(
-                [
-                    f"""You are a professional dental AI assistant. Analyze the provided dental image (image {i}) and provide a comprehensive assessment.
-
-**Instructions:**
-1. Examine the image carefully for dental health indicators
-2. Provide a detailed analysis in a professional, medical tone
-3. Focus on both positive aspects and areas of concern
-4. Be specific about tooth locations and conditions
-5. Provide actionable recommendations when appropriate
-
-**Analysis Structure:**
-Please provide your analysis in the following format:
-
-**Overall Assessment:**
-[Brief summary of dental health status]
-Also give overall rating of the dental health of the patient out of 5.
-
-**Detailed Findings:**
-- [Specific observations about teeth, gums, and oral health]
-- [Note any visible issues like cavities, discoloration, gaps, etc.]
-- [Comment on gum health and overall oral hygiene]
-
-**Areas of Concern:**
-- [List any detected issues or potential problems]
-- [Specify severity and urgency if applicable]
-
-**Positive Aspects:**
-- [Highlight good dental health indicators]
-- [Note healthy teeth, gums, or good oral hygiene signs]
-
-**Recommendations:**
-- [Suggest specific actions or lifestyle changes]
-- [Mention if professional dental consultation is recommended]
-- [Provide preventive care advice]
-
-**Important Notes:**
-- If the image quality is poor or unclear, mention this limitation
-- If the image doesn't show teeth clearly, state this clearly
-- Be encouraging but honest about any concerns
-- Use professional medical terminology appropriately
-- Keep the tone helpful and educational
-
-**Response Guidelines:**
-- Keep the total response between 200-400 words
-- Use clear, easy-to-understand language
-- Be specific about tooth locations (e.g., "upper right molar", "lower left incisor")
-- If no teeth are visible, clearly state this
-- Focus on what can be observed from the image
-
-Please analyze the dental image and provide your assessment following these guidelines.""",
-                    {
-                        "mime_type": mime_type,
-                        "data": image_bytes
-                    }
-                ]
-            )
-
-            analyses.append({
-                "image_number": i,
-                "analysis": result.text,
-                "image_path": image_path
-            })
-
-            # Save analysis to DB
-            report = AnalysisHistory(
-                user_id=user.id,
-                image_url=image_path,
-                ai_report=result.text
-            )
-            session.add(report)
-
-        session.commit()
-
-        return {
-            "message": f"Dental analysis completed for {len(analyses)} image(s)",
-            "analyses": analyses,
-            "total_images_analyzed": len(analyses)
-        }
-
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+# History endpoints are now handled by the dedicated analysis router
 
 # ------------------------
-# Get Analysis History
+# Redirect old history endpoint to new location
 # ------------------------
 @app.get("/history")
-def get_history(
+def redirect_history(
     current_user: int = Depends(get_current_user),
     session: Session = Depends(get_session)
 ):
-    reports = session.exec(
-        select(AnalysisHistory)
-        .where(AnalysisHistory.user_id == current_user)
-        .order_by(AnalysisHistory.created_at.desc())
-    ).all()
-
-    return [
-        {
-            "id": r.id,
-            "analysis": r.ai_report,
-            "image_path": r.image_url,
-            "timestamp": r.created_at.strftime("%Y-%m-%d %H:%M:%S")
-        }
-        for r in reports
-    ]
+    """Redirect /history to /analysis/history for backward compatibility"""
+    from .analysis import get_history
+    return get_history(current_user, session)
 
 # ------------------------
 # Get User Profile
@@ -333,12 +343,37 @@ def get_profile(
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
     
+    # Build profile photo URL
+    profile_photo_url = None
+    if user.profile_photo_url:
+        if user.profile_photo_url.startswith("http"):
+            profile_photo_url = user.profile_photo_url
+        else:
+            profile_photo_url = f"{settings.BASE_URL}/{user.profile_photo_url}"
+    
     return {
-        "id": user.id,
-        "full_name": user.full_name,
-        "mobile_number": user.mobile_number,
-        "profile_photo_url": user.profile_photo_url,
-        "created_at": user.created_at.isoformat()
+        "success": True,
+        "data": {
+            "id": user.id,
+            "full_name": user.full_name,
+            "mobile_number": user.mobile_number,
+            "profile_photo_url": profile_photo_url,
+            "created_at": user.created_at.isoformat()
+        },
+        "error": None
+    }
+
+# ------------------------
+# Test Authentication Endpoint
+# ------------------------
+@app.get("/test-auth")
+def test_auth(current_user: int = Depends(get_current_user)):
+    """Test endpoint to verify authentication is working"""
+    return {
+        "success": True,
+        "message": "Authentication successful",
+        "user_id": current_user,
+        "timestamp": datetime.utcnow().isoformat()
     }
 
 # ------------------------
@@ -361,7 +396,19 @@ def update_profile(
     
     # Update profile photo if provided
     if profile_photo:
-        uploads_dir = "uploads/profiles"
+        # Validate file type
+        if profile_photo.content_type not in settings.ALLOWED_IMAGE_TYPES:
+            raise HTTPException(status_code=415, detail="Invalid file type")
+            
+        # Validate file size
+        profile_photo.file.seek(0, 2)
+        file_size = profile_photo.file.tell()
+        profile_photo.file.seek(0)
+        
+        if file_size > settings.MAX_FILE_SIZE:
+            raise HTTPException(status_code=413, detail="File too large")
+        
+        uploads_dir = f"{settings.UPLOAD_DIR}/profiles"
         os.makedirs(uploads_dir, exist_ok=True)
         ext = os.path.splitext(profile_photo.filename)[1]
         filename = f"{datetime.utcnow().timestamp()}_{profile_photo.filename}"
@@ -372,18 +419,31 @@ def update_profile(
                 shutil.copyfileobj(profile_photo.file, f)
             user.profile_photo_url = saved_path
         except Exception as e:
+            logger.error(f"Profile photo save error: {str(e)}")
             raise HTTPException(status_code=500, detail=f"Could not save profile photo: {e}")
     
     session.add(user)
     session.commit()
     session.refresh(user)
     
+    # Build profile photo URL
+    profile_photo_url = None
+    if user.profile_photo_url:
+        if user.profile_photo_url.startswith("http"):
+            profile_photo_url = user.profile_photo_url
+        else:
+            profile_photo_url = f"{settings.BASE_URL}/{user.profile_photo_url}"
+    
     return {
-        "id": user.id,
-        "full_name": user.full_name,
-        "mobile_number": user.mobile_number,
-        "profile_photo_url": user.profile_photo_url,
-        "created_at": user.created_at.isoformat()
+        "success": True,
+        "data": {
+            "id": user.id,
+            "full_name": user.full_name,
+            "mobile_number": user.mobile_number,
+            "profile_photo_url": profile_photo_url,
+            "created_at": user.created_at.isoformat()
+        },
+        "error": None
     }
 
 # ------------------------
@@ -820,5 +880,10 @@ def get_esp32_analysis(
 # ------------------------
 if __name__ == "__main__":
     import uvicorn
-    port = int(os.environ.get("PORT", 8000))
-    uvicorn.run("app.main:app", host="0.0.0.0", port=port)
+    uvicorn.run(
+        "app.main:app", 
+        host=settings.HOST, 
+        port=settings.PORT,
+        workers=1,  # Railway works better with single worker
+        log_level=settings.LOG_LEVEL.lower()
+    )
