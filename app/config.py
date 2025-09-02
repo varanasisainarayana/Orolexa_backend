@@ -1,4 +1,4 @@
-"""Centralized configuration with sane production defaults."""
+#config.py
 import os
 from pydantic_settings import BaseSettings
 from pydantic import Field
@@ -65,23 +65,24 @@ class Settings(BaseSettings):
     # Railway specific settings (string to avoid boolean parsing errors)
     RAILWAY_ENVIRONMENT: str = os.environ.get("RAILWAY_ENVIRONMENT", "")
 
-# Database
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./orolexa.db")
+    # Optional AWS S3 Storage
+    AWS_S3_BUCKET: Optional[str] = os.environ.get("AWS_S3_BUCKET")
+    AWS_REGION: Optional[str] = os.environ.get("AWS_REGION")
+    AWS_S3_BASE_URL: Optional[str] = os.environ.get("AWS_S3_BASE_URL")
+    
+    class Config:
+        env_file = ".env"
+        case_sensitive = True
+        extra = "allow"  # Allow extra fields from environment variables
 
-# Security / CORS
-ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "*").split(",")
-TRUSTED_HOSTS = os.getenv("TRUSTED_HOSTS", "*").split(",")
+@lru_cache()
+def get_settings() -> Settings:
+    s = Settings()
+    # Normalize ALLOWED_ORIGINS if provided as comma-separated string env var CORS_ORIGINS
+    cors_env = os.environ.get("CORS_ORIGINS")
+    if cors_env:
+        s.ALLOWED_ORIGINS = [o.strip() for o in cors_env.split(",") if o.strip()]
+    return s
 
-# ESP32 limits
-ESP32_MAX_IMAGE_SIZE = int(os.getenv("ESP32_MAX_IMAGE_SIZE", str(10 * 1024 * 1024)))  # 10MB
-ESP32_MAX_IMAGES_PER_REQUEST = int(os.getenv("ESP32_MAX_IMAGES_PER_REQUEST", "10"))
-ESP32_ANALYSIS_TIMEOUT_MS = int(os.getenv("ESP32_ANALYSIS_TIMEOUT", "30000"))
-ESP32_STREAM_TIMEOUT_MS = int(os.getenv("ESP32_STREAM_TIMEOUT", "5000"))
-
-# Rate limiting (simple in-memory)
-RATE_LIMIT_WINDOW_SEC = int(os.getenv("RATE_LIMIT_WINDOW_SEC", "900"))  # 15 min
-RATE_LIMIT_MAX_REQUESTS = int(os.getenv("RATE_LIMIT_MAX_REQUESTS", "100"))
-
-# App
-ENV = os.getenv("ENV", "production")
-DEBUG = ENV != "production"
+# Create settings instance
+settings = get_settings()
