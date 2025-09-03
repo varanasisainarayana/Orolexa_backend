@@ -391,7 +391,6 @@ class ESP32ImageUpload(BaseModel):
 class ESP32ConnectionTestRequest(BaseModel):
     ipAddress: str
     port: int = 81
-    streamPath: str = "/stream"
 
 
 class ESP32ConnectionTestResponse(BaseModel):
@@ -442,7 +441,6 @@ class ESP32SessionRequest(BaseModel):
     deviceId: str
     ipAddress: str
     port: int = 81
-    streamPath: str = "/stream"
     userId: Optional[str] = None
     sessionType: SessionType = SessionType.analysis
 

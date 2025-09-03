@@ -7,6 +7,7 @@ from starlette.middleware.httpsredirect import HTTPSRedirectMiddleware
 from fastapi import Request
 from fastapi.responses import JSONResponse
 from starlette.middleware.gzip import GZipMiddleware
+from starlette.staticfiles import StaticFiles
 from contextlib import asynccontextmanager
 from dotenv import load_dotenv
 from datetime import datetime
@@ -15,6 +16,8 @@ import mimetypes
 import google.generativeai as genai
 from sqlmodel import Session, select
 import logging
+from collections import defaultdict, deque
+import time as _time
 
 # Load environment variables as early as possible
 load_dotenv()
@@ -22,7 +25,6 @@ load_dotenv()
 from . import auth
 from .database import create_db_and_tables, get_session
 from .config import (
-    TRUSTED_HOSTS,
     ESP32_MAX_IMAGE_SIZE,
     ESP32_MAX_IMAGES_PER_REQUEST,
     ESP32_ANALYSIS_TIMEOUT_MS,
@@ -41,7 +43,6 @@ from .schemas import (
     ESP32ImageAnalysisResponse, ESP32SessionRequest, 
     ESP32SessionResponse, ESP32ImageUploadRequest, ESP32ImageUploadResponse
 )
-from .exceptions import http_exception_handler
 
 # Configure logging
 logging.basicConfig(
@@ -133,6 +134,27 @@ def get_current_user(request: Request, credentials: HTTPAuthorizationCredentials
     
     logger.info(f"Successfully authenticated user ID: {user_id}")
     return user_id
+
+# ------------------------
+# Simple in-memory rate limiting for ESP32 endpoints
+# ------------------------
+_rate_buckets = defaultdict(lambda: deque())
+
+def _rate_key(request: Request, user_id: int) -> str:
+    client_ip = request.client.host if request.client else "unknown"
+    return f"{user_id}:{client_ip}:{request.url.path}"
+
+def esp32_rate_limit(request: Request, current_user: int = Depends(get_current_user)):
+    key = _rate_key(request, int(current_user) if current_user is not None else 0)
+    now = _time.time()
+    window_start = now - RATE_LIMIT_WINDOW_SEC
+    q = _rate_buckets[key]
+    while q and q[0] < window_start:
+        q.popleft()
+    if len(q) >= RATE_LIMIT_MAX_REQUESTS:
+        raise HTTPException(status_code=429, detail="Too many requests from this client for this endpoint")
+    q.append(now)
+    return int(current_user) if current_user is not None else 0
 
 # Include authentication router
 app.include_router(auth.router)
@@ -590,27 +612,7 @@ Please analyze the dental images and provide your assessment following these gui
         )
 
 
-@app.get("/api/esp32/stream-status/{device_id}")
-def get_esp32_stream_status(
-    device_id: str,
-    current_user: int = Depends(get_current_user)
-):
-    """
-    Get ESP32-CAM stream status
-    """
-    try:
-        device_info = esp32_devices.get(device_id, {})
-        
-        # Streaming removed - handled in frontend
-        return {
-            "deviceId": device_id,
-            "isActive": device_info.get("status") == "online",
-            "lastSeen": device_info.get("last_seen", datetime.utcnow().isoformat()),
-            "message": "Streaming handled in frontend"
-        }
-        
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+# Streaming status endpoint removed - handled entirely in frontend
 
 
 @app.post("/api/esp32/sessions")
@@ -635,15 +637,13 @@ def create_esp32_session(
             "userId": current_user,
             "sessionType": request.sessionType.value,
             "ipAddress": request.ipAddress,
-            "port": request.port,
-            "streamPath": request.streamPath
+            "port": request.port
         }
         
         # Update device info
         esp32_devices[request.deviceId] = {
             "ip_address": request.ipAddress,
             "port": request.port,
-            "stream_path": request.streamPath,
             "status": "online",
             "last_seen": datetime.utcnow().isoformat(),
             "session_id": session_id

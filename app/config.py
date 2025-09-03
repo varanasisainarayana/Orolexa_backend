@@ -2,7 +2,6 @@
 import os
 from pydantic_settings import BaseSettings
 from pydantic import Field
-from pydantic import field_validator
 from pydantic_settings import SettingsConfigDict
 from typing import Optional, List
 from functools import lru_cache
@@ -93,21 +92,17 @@ from functools import lru_cache
 
 @lru_cache()
 def get_settings() -> Settings:
-    return Settings()
+    s = Settings()
+    # Normalize ALLOWED_ORIGINS if provided as comma-separated string env var CORS_ORIGINS
+    cors_env = os.environ.get("CORS_ORIGINS")
+    if cors_env:
+        s.ALLOWED_ORIGINS = cors_env
+    return s
 
 settings: Settings = get_settings()
 
 # Database
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./orolexa.db")
-
-@lru_cache()
-def get_settings() -> Settings:
-    s = Settings()
-    # Normalize ALLOWED_ORIGINS if provided as comma-separated string env var CORS_ORIGINS
-    cors_env = os.environ.get("CORS_ORIGINS")
-    if cors_env:
-        s.ALLOWED_ORIGINS = [o.strip() for o in cors_env.split(",") if o.strip()]
-    return s
 
 # ESP32 limits
 ESP32_MAX_IMAGE_SIZE = int(os.getenv("ESP32_MAX_IMAGE_SIZE", str(10 * 1024 * 1024)))  # 10MB
