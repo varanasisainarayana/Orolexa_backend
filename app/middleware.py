@@ -98,3 +98,24 @@ class ErrorHandlingMiddleware(BaseHTTPMiddleware):
                     status_code=500,
                     content={"detail": "Internal server error"}
                 )
+
+class RequestSizeLimitMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        # Enforce a hard cap on request size using Content-Length when available
+        try:
+            content_length = request.headers.get("content-length")
+            if content_length is not None:
+                try:
+                    size = int(content_length)
+                    if size > settings.MAX_FILE_SIZE:
+                        return JSONResponse(
+                            status_code=413,
+                            content={"detail": "Request entity too large"}
+                        )
+                except ValueError:
+                    # Malformed header; proceed but still guarded by downstream file checks
+                    pass
+            return await call_next(request)
+        except Exception as e:
+            logger.error(f"RequestSizeLimitMiddleware error: {e}")
+            return JSONResponse(status_code=500, content={"detail": "Internal server error"})

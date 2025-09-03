@@ -6,6 +6,8 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from starlette.middleware.httpsredirect import HTTPSRedirectMiddleware
 from fastapi import Request
 from fastapi.responses import JSONResponse
+from starlette.middleware.gzip import GZipMiddleware
+from contextlib import asynccontextmanager
 from dotenv import load_dotenv
 from datetime import datetime
 import shutil
@@ -14,10 +16,12 @@ import google.generativeai as genai
 from sqlmodel import Session, select
 import logging
 
+# Load environment variables as early as possible
+load_dotenv()
+
 from . import auth
 from .database import create_db_and_tables, get_session
 from .config import (
-    ALLOWED_ORIGINS,
     TRUSTED_HOSTS,
     ESP32_MAX_IMAGE_SIZE,
     ESP32_MAX_IMAGES_PER_REQUEST,
@@ -26,12 +30,15 @@ from .config import (
     RATE_LIMIT_MAX_REQUESTS,
     DEBUG,
 )
+from .config import settings
+from .middleware import RateLimitMiddleware, SecurityMiddleware, LoggingMiddleware, ErrorHandlingMiddleware, RequestSizeLimitMiddleware
+from .exceptions import http_exception_handler
 from .utils import decode_jwt_token
 from .models import AnalysisHistory, User
 from .schemas import (
-    IPAddressRequest, StreamDataResponse, ESP32DataRequest, ESP32DeviceInfo, ESP32ImageUpload,
+    IPAddressRequest, ESP32DataRequest, ESP32DeviceInfo, ESP32ImageUpload,
     ESP32ConnectionTestRequest, ESP32ConnectionTestResponse, ESP32ImageAnalysisRequest, 
-    ESP32ImageAnalysisResponse, ESP32StreamStatusResponse, ESP32SessionRequest, 
+    ESP32ImageAnalysisResponse, ESP32SessionRequest, 
     ESP32SessionResponse, ESP32ImageUploadRequest, ESP32ImageUploadResponse
 )
 
@@ -86,6 +93,7 @@ app.add_exception_handler(HTTPException, http_exception_handler)
 app.add_middleware(ErrorHandlingMiddleware)
 app.add_middleware(LoggingMiddleware)
 app.add_middleware(SecurityMiddleware)
+app.add_middleware(RequestSizeLimitMiddleware)
 app.add_middleware(RateLimitMiddleware)
 
 # GZip compression
@@ -94,7 +102,7 @@ app.add_middleware(GZipMiddleware, minimum_size=settings.GZIP_MIN_SIZE)
 # Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=ALLOWED_ORIGINS,
+    allow_origins=settings.allowed_origins_list,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -198,7 +206,7 @@ from . import notifications
 from . import devices
 from . import health_analytics
 from . import settings as settings_router
-from . import streaming
+# Streaming removed - implemented in frontend
 
 app.include_router(analysis.router)
 app.include_router(doctors.router)
@@ -207,7 +215,6 @@ app.include_router(notifications.router)
 app.include_router(devices.router)
 app.include_router(health_analytics.router)
 app.include_router(settings_router.router)
-app.include_router(streaming.router)
 
 # Health check endpoint
 @app.get("/health")
@@ -484,14 +491,8 @@ def test_esp32_connection(
                 error="Device not reachable"
             )
         
-        # Test stream endpoint
-        import requests
-        try:
-            stream_url = f"http://{request.ipAddress}:{request.port}{request.streamPath}"
-            response = requests.get(stream_url, timeout=ESP32_STREAM_TIMEOUT_MS / 1000)
-            stream_available = response.status_code == 200
-        except:
-            stream_available = False
+        # Test stream endpoint (removed - streaming handled in frontend)
+        stream_available = False
         
         response_time = int((time.time() - start_time) * 1000)
         
@@ -671,24 +672,13 @@ def get_esp32_stream_status(
     try:
         device_info = esp32_devices.get(device_id, {})
         
-        return ESP32StreamStatusResponse(
-            deviceId=device_id,
-            isActive=device_info.get("status") == "online",
-            lastSeen=device_info.get("last_seen", datetime.utcnow().isoformat()),
-            streamQuality="good",
-            connectionStats={
-                "uptime": device_info.get("uptime", 0),
-                "totalImages": len([img for img in esp32_images.values() if img.get("deviceId") == device_id]),
-                "lastImageTime": device_info.get("last_image_time"),
-                "averageResponseTime": 50
-            },
-            deviceInfo={
-                "firmware": "ESP32-CAM v2.1.0",
-                "model": "ESP32-CAM-MB",
-                "resolution": "1600x1200",
-                "frameRate": 30
-            }
-        )
+        # Streaming removed - handled in frontend
+        return {
+            "deviceId": device_id,
+            "isActive": device_info.get("status") == "online",
+            "lastSeen": device_info.get("last_seen", datetime.utcnow().isoformat()),
+            "message": "Streaming handled in frontend"
+        }
         
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

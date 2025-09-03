@@ -1,6 +1,11 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, validator
 from typing import Optional, List, Dict, Any
 from enum import Enum
+from datetime import datetime
+import re
+import base64
+import io
+from PIL import Image
 
 
 # =========================
@@ -338,17 +343,10 @@ class UpdateSettingsRequest(BaseModel):
 
 
 # =========================
-# IP Address Streaming Schemas
+# IP Address Schemas (Streaming removed - handled in frontend)
 # =========================
 class IPAddressRequest(BaseModel):
     ip_address: str
-
-
-class StreamDataResponse(BaseModel):
-    ip_address: str
-    timestamp: str
-    data: str
-    status: str
 
 
 # =========================
@@ -431,13 +429,7 @@ class ESP32ImageAnalysisResponse(BaseModel):
     nextSteps: Optional[List[str]] = None
 
 
-class ESP32StreamStatusResponse(BaseModel):
-    deviceId: str
-    isActive: bool
-    lastSeen: str
-    streamQuality: str  # 'excellent' | 'good' | 'fair' | 'poor'
-    connectionStats: Dict[str, Any]
-    deviceInfo: Optional[Dict[str, Any]] = None
+# ESP32StreamStatusResponse removed - streaming handled in frontend
 
 
 class SessionType(str, Enum):
