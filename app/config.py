@@ -2,10 +2,12 @@
 import os
 from pydantic_settings import BaseSettings
 from pydantic import Field
+from pydantic_settings import SettingsConfigDict
 from typing import Optional, List
 from functools import lru_cache
 
 class Settings(BaseSettings):
+    model_config = SettingsConfigDict(env_file=".env", case_sensitive=False)
     # Application Settings
     APP_NAME: str = "Dental AI API"
     APP_VERSION: str = "1.0.0"
@@ -25,11 +27,10 @@ class Settings(BaseSettings):
     ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60
     
-    # CORS Settings (Railway specific)
-    # Comma-separated list in env (e.g., https://app.orolexa.com,https://orolexa.com)
-    ALLOWED_ORIGINS: List[str] = ["*"]  # Update with your frontend domain
-    ALLOWED_METHODS: List[str] = ["GET", "POST", "PUT", "DELETE", "OPTIONS"]
-    ALLOWED_HEADERS: List[str] = ["*"]
+    # CORS Settings (accept comma-separated strings to avoid JSON parsing in env)
+    ALLOWED_ORIGINS: str = os.environ.get("ALLOWED_ORIGINS", "*")
+    ALLOWED_METHODS: str = os.environ.get("ALLOWED_METHODS", "GET,POST,PUT,DELETE,OPTIONS")
+    ALLOWED_HEADERS: str = os.environ.get("ALLOWED_HEADERS", "*")
     CORS_ALLOW_CREDENTIALS: bool = True
     
     # File Upload Settings
@@ -65,15 +66,29 @@ class Settings(BaseSettings):
     # Railway specific settings (string to avoid boolean parsing errors)
     RAILWAY_ENVIRONMENT: str = os.environ.get("RAILWAY_ENVIRONMENT", "")
 
-    # Optional AWS S3 Storage
-    AWS_S3_BUCKET: Optional[str] = os.environ.get("AWS_S3_BUCKET")
-    AWS_REGION: Optional[str] = os.environ.get("AWS_REGION")
-    AWS_S3_BASE_URL: Optional[str] = os.environ.get("AWS_S3_BASE_URL")
-    
-    class Config:
-        env_file = ".env"
-        case_sensitive = True
-        extra = "allow"  # Allow extra fields from environment variables
+    # Accept comma-separated strings for list envs in addition to JSON arrays
+    def _split_csv(self, value: str) -> List[str]:
+        if value is None:
+            return []
+        value = value.strip()
+        if value == "":
+            return []
+        return [item.strip() for item in value.split(",")]
+
+    @property
+    def allowed_origins_list(self) -> List[str]:
+        return self._split_csv(self.ALLOWED_ORIGINS)
+
+    @property
+    def allowed_methods_list(self) -> List[str]:
+        return self._split_csv(self.ALLOWED_METHODS)
+
+    @property
+    def allowed_headers_list(self) -> List[str]:
+        return self._split_csv(self.ALLOWED_HEADERS)
+
+# Instantiate settings for import across the app
+from functools import lru_cache
 
 @lru_cache()
 def get_settings() -> Settings:
@@ -81,8 +96,24 @@ def get_settings() -> Settings:
     # Normalize ALLOWED_ORIGINS if provided as comma-separated string env var CORS_ORIGINS
     cors_env = os.environ.get("CORS_ORIGINS")
     if cors_env:
-        s.ALLOWED_ORIGINS = [o.strip() for o in cors_env.split(",") if o.strip()]
+        s.ALLOWED_ORIGINS = cors_env
     return s
 
-# Create settings instance
-settings = get_settings()
+settings: Settings = get_settings()
+
+# Database
+DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./orolexa.db")
+
+# ESP32 limits
+ESP32_MAX_IMAGE_SIZE = int(os.getenv("ESP32_MAX_IMAGE_SIZE", str(10 * 1024 * 1024)))  # 10MB
+ESP32_MAX_IMAGES_PER_REQUEST = int(os.getenv("ESP32_MAX_IMAGES_PER_REQUEST", "10"))
+ESP32_ANALYSIS_TIMEOUT_MS = int(os.getenv("ESP32_ANALYSIS_TIMEOUT", "30000"))
+# ESP32_STREAM_TIMEOUT_MS removed - streaming handled in frontend
+
+# Rate limiting (simple in-memory)
+RATE_LIMIT_WINDOW_SEC = int(os.getenv("RATE_LIMIT_WINDOW_SEC", "900"))  # 15 min
+RATE_LIMIT_MAX_REQUESTS = int(os.getenv("RATE_LIMIT_MAX_REQUESTS", "100"))
+
+# App
+ENV = os.getenv("ENV", "production")
+DEBUG = ENV != "production"
