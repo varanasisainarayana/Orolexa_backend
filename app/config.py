@@ -1,4 +1,4 @@
-"""Centralized configuration with sane production defaults."""
+#config.py
 import os
 from pydantic_settings import BaseSettings
 from pydantic import Field
@@ -100,9 +100,14 @@ settings: Settings = get_settings()
 # Database
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./orolexa.db")
 
-# Security / CORS
-ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "*").split(",")
-TRUSTED_HOSTS = os.getenv("TRUSTED_HOSTS", "*").split(",")
+@lru_cache()
+def get_settings() -> Settings:
+    s = Settings()
+    # Normalize ALLOWED_ORIGINS if provided as comma-separated string env var CORS_ORIGINS
+    cors_env = os.environ.get("CORS_ORIGINS")
+    if cors_env:
+        s.ALLOWED_ORIGINS = [o.strip() for o in cors_env.split(",") if o.strip()]
+    return s
 
 # ESP32 limits
 ESP32_MAX_IMAGE_SIZE = int(os.getenv("ESP32_MAX_IMAGE_SIZE", str(10 * 1024 * 1024)))  # 10MB

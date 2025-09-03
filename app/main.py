@@ -41,6 +41,7 @@ from .schemas import (
     ESP32ImageAnalysisResponse, ESP32SessionRequest, 
     ESP32SessionResponse, ESP32ImageUploadRequest, ESP32ImageUploadResponse
 )
+from .exceptions import http_exception_handler
 
 # Configure logging
 logging.basicConfig(
@@ -69,11 +70,6 @@ async def lifespan(app: FastAPI):
     yield
     # Shutdown
     logger.info("Shutting down Dental AI API...")
-
-# Validate essential envs in production
-if not DEBUG and not os.getenv("GEMINI_API_KEY"):
-    # Log only; endpoint usage will error explicitly when called
-    pass
 
 # Initialize FastAPI
 app = FastAPI(
@@ -108,65 +104,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Trusted hosts and optional HTTPS redirect (behind a proxy/ingress)
-app.add_middleware(TrustedHostMiddleware, allowed_hosts=TRUSTED_HOSTS)
-if not DEBUG and os.getenv("ENABLE_HTTPS_REDIRECT", "true").lower() == "true":
-    app.add_middleware(HTTPSRedirectMiddleware)
-
-# Simple security headers
-@app.middleware("http")
-async def add_security_headers(request: Request, call_next):
-    response = await call_next(request)
-    response.headers["X-Content-Type-Options"] = "nosniff"
-    response.headers["X-Frame-Options"] = "DENY"
-    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
-    response.headers["Permissions-Policy"] = "camera=(), microphone=()"
-    # HSTS only over HTTPS/production proxies
-    if not DEBUG:
-        response.headers["Strict-Transport-Security"] = "max-age=63072000; includeSubDomains; preload"
-    return response
-
-# Centralized exception handlers
-@app.exception_handler(HTTPException)
-async def http_exception_handler(request: Request, exc: HTTPException):
-    return JSONResponse(status_code=exc.status_code, content={
-        "success": False,
-        "message": exc.detail,
-        "path": str(request.url)
-    })
-
-@app.exception_handler(Exception)
-async def unhandled_exception_handler(request: Request, exc: Exception):
-    return JSONResponse(status_code=500, content={
-        "success": False,
-        "message": "Internal server error",
-        "path": str(request.url)
-    })
-
-# ------------------------
-# Simple in-memory rate limiting for ESP32 endpoints
-# ------------------------
-from collections import defaultdict, deque
-import time as _time
-
-_rate_buckets = defaultdict(lambda: deque())
-
-def _rate_key(request: Request, user_id: int) -> str:
-    client_ip = request.client.host if request.client else "unknown"
-    return f"{user_id}:{client_ip}:{request.url.path}"
-
-async def esp32_rate_limit(request: Request, current_user: int = Depends(lambda creds=Depends(HTTPBearer()): int(decode_jwt_token(creds.credentials).get("sub")) )):
-    key = _rate_key(request, current_user)
-    now = _time.time()
-    window_start = now - RATE_LIMIT_WINDOW_SEC
-    q = _rate_buckets[key]
-    # drop old
-    while q and q[0] < window_start:
-        q.popleft()
-    if len(q) >= RATE_LIMIT_MAX_REQUESTS:
-        raise HTTPException(status_code=429, detail="Too many requests from this client for this endpoint")
-    q.append(now)
-    return current_user
+# Mount static files for uploaded images
+app.mount("/uploads", StaticFiles(directory=settings.UPLOAD_DIR), name="uploads")
 
 # Auth scheme
 oauth2_scheme = HTTPBearer(auto_error=False)
@@ -240,16 +179,6 @@ def health_check():
 
 
 
-# Dependency to get current user from JWT
-def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(oauth2_scheme)):
-    token = credentials.credentials
-    payload = decode_jwt_token(token)
-    if not payload or not payload.get("sub"):
-        raise HTTPException(status_code=401, detail="Invalid or expired token")
-    try:
-        return int(payload.get("sub"))  # user_id as int
-    except Exception:
-        raise HTTPException(status_code=401, detail="Invalid token subject")
 
 # ------------------------
 # Upload Images (three inputs, only first required)
