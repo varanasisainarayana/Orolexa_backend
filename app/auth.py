@@ -1234,6 +1234,43 @@ async def get_image(filename: str):
         logger.error(f"Error serving image {filename}: {e}")
         raise HTTPException(status_code=500, detail="Failed to serve image")
 
+@router.get("/images/profiles/{filename:path}")
+async def get_profile_image_by_filename(filename: str):
+    """
+    Get profile image by filename (public access for profile images)
+    """
+    try:
+        # Construct the file path
+        file_path = os.path.join(settings.UPLOAD_DIR, "profiles", filename)
+        
+        # Security: Prevent directory traversal
+        if not os.path.abspath(file_path).startswith(os.path.abspath(os.path.join(settings.UPLOAD_DIR, "profiles"))):
+            raise HTTPException(status_code=403, detail="Access denied")
+        
+        # Check if file exists
+        if not os.path.exists(file_path):
+            raise HTTPException(status_code=404, detail="Profile image not found")
+        
+        # Determine content type based on file extension
+        content_type = "image/jpeg"  # default
+        if filename.lower().endswith('.png'):
+            content_type = "image/png"
+        elif filename.lower().endswith('.webp'):
+            content_type = "image/webp"
+        
+        # Return the image file
+        return FileResponse(
+            file_path,
+            media_type=content_type,
+            headers={"Cache-Control": "public, max-age=31536000"}  # Cache for 1 year
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error serving profile image {filename}: {e}")
+        raise HTTPException(status_code=500, detail="Failed to serve profile image")
+
 @router.put("/profile/update", response_model=UpdateProfileResponse)
 async def update_profile(
     payload: UpdateProfileRequest,
