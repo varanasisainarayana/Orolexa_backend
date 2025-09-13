@@ -1102,19 +1102,27 @@ async def get_metrics():
 async def get_current_user(request: Request) -> User:
     """Get current user from JWT token"""
     try:
-        # Get token from Authorization header
-        auth_header = request.headers.get('Authorization')
-        if not auth_header or not auth_header.startswith('Bearer '):
-            raise HTTPException(status_code=401, detail="Invalid authorization header")
+        token = None
         
-        token = auth_header.split(' ')[1]
+        # First try Authorization header
+        auth_header = request.headers.get('Authorization')
+        if auth_header and auth_header.startswith('Bearer '):
+            token = auth_header.split(' ')[1]
+        else:
+            # Fallback to cookie
+            token = request.cookies.get("access_token")
+        
+        if not token:
+            raise HTTPException(status_code=401, detail="Invalid authorization header")
         
         # Decode JWT token
         payload = decode_jwt_token(token)
-        user_id = payload.get('sub')
+        if not payload:
+            raise HTTPException(status_code=401, detail="Invalid or expired token")
         
+        user_id = payload.get('sub')
         if not user_id:
-            raise HTTPException(status_code=401, detail="Invalid token")
+            raise HTTPException(status_code=401, detail="Invalid token: missing user ID")
         
         # Get user from database
         with Session(engine) as session:
@@ -1235,6 +1243,7 @@ async def get_image(filename: str):
         raise HTTPException(status_code=500, detail="Failed to serve image")
 
 @router.get("/images/profiles/{filename:path}")
+@router.head("/images/profiles/{filename:path}")
 async def get_profile_image_by_filename(filename: str):
     """
     Get profile image by filename (public access for profile images)
