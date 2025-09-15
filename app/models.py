@@ -4,7 +4,7 @@ from sqlmodel import SQLModel, Field, Relationship
 from datetime import datetime
 import json
 import uuid
-from sqlalchemy import Column, String, Boolean, Integer, DateTime, Text, ForeignKey, Index
+from sqlalchemy import Column, String, Boolean, Integer, DateTime, Text, ForeignKey, Index, LargeBinary
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.ext.declarative import declarative_base
 
@@ -20,7 +20,8 @@ class User(SQLModel, table=True):
     country_code: Optional[str] = Field(max_length=5, default=None)
     age: Optional[int] = Field(default=None)
     date_of_birth: Optional[datetime] = Field(default=None)
-    profile_image_url: Optional[str] = Field(max_length=255, default=None)
+    profile_image_url: Optional[str] = Field(max_length=255, default=None)  # Legacy field for backward compatibility
+    profile_image_id: Optional[str] = Field(foreign_key="image_storage.id", default=None)  # New database reference
     email: Optional[str] = Field(max_length=100, default=None)
     is_verified: bool = Field(default=False)
     is_active: bool = Field(default=True)
@@ -33,6 +34,7 @@ class User(SQLModel, table=True):
     notifications: List["Notification"] = Relationship(back_populates="user")
     device_connections: List["DeviceConnection"] = Relationship(back_populates="user")
     sessions: List["UserSession"] = Relationship(back_populates="user")
+    profile_image: Optional["ImageStorage"] = Relationship(foreign_keys=[profile_image_id])
 
 class OTPCode(SQLModel, table=True):
     __tablename__ = "otp_codes"
@@ -146,3 +148,24 @@ class OTPRequest(SQLModel, table=True):
     # Fields for registration flow (stored until verify)
     full_name: Optional[str] = None
     profile_photo_url: Optional[str] = None
+
+class ImageStorage(SQLModel, table=True):
+    __tablename__ = "image_storage"
+    
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()), primary_key=True)
+    user_id: str = Field(foreign_key="users.id", index=True)
+    filename: str = Field(max_length=255)
+    content_type: str = Field(max_length=100)  # image/jpeg, image/png, etc.
+    file_size: int  # Size in bytes
+    image_data: bytes = Field(sa_column=Column(LargeBinary))  # Actual image binary data
+    image_type: str = Field(max_length=50)  # profile, analysis, thumbnail, etc.
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    
+    # Optional metadata
+    width: Optional[int] = None
+    height: Optional[int] = None
+    thumbnail_id: Optional[str] = Field(foreign_key="image_storage.id", default=None)  # Reference to thumbnail
+    
+    # Relationships
+    user: Optional[User] = Relationship()
+    thumbnail: Optional["ImageStorage"] = Relationship(remote_side=[id])
