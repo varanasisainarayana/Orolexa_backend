@@ -62,6 +62,11 @@ async def lifespan(app: FastAPI):
     app.state.db_init_error = None
     try:
         create_db_and_tables()
+        
+        # Run database migrations
+        from .migrations import run_migrations
+        run_migrations()
+        
         logger.info("Database initialized successfully")
     except Exception as e:
         # Do not crash the app; report via health endpoint
