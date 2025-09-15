@@ -51,8 +51,5 @@ EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=30s --start-period=5s --retries=3 \
     CMD curl -f http://localhost:${PORT:-8000}/health || exit 1
 
-# Persist uploads in a volume at runtime
-VOLUME ["/app/uploads"]
-
 # Run with Gunicorn+Uvicorn, bind to $PORT if present
 CMD ["sh", "-c", "gunicorn app.main:app -k uvicorn.workers.UvicornWorker -b 0.0.0.0:${PORT:-8000} --workers 2 --timeout 60"]
