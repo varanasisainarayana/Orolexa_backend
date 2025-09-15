@@ -34,7 +34,7 @@ class User(SQLModel, table=True):
     notifications: List["Notification"] = Relationship(back_populates="user")
     device_connections: List["DeviceConnection"] = Relationship(back_populates="user")
     sessions: List["UserSession"] = Relationship(back_populates="user")
-    profile_image: Optional["ImageStorage"] = Relationship(foreign_keys=[profile_image_id])
+    profile_image: Optional["ImageStorage"] = Relationship()
 
 class OTPCode(SQLModel, table=True):
     __tablename__ = "otp_codes"
@@ -168,4 +168,4 @@ class ImageStorage(SQLModel, table=True):
     
     # Relationships
     user: Optional[User] = Relationship()
-    thumbnail: Optional["ImageStorage"] = Relationship(remote_side=[id])
+    thumbnail: Optional["ImageStorage"] = Relationship()
