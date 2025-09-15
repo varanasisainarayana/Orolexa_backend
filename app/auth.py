@@ -3,13 +3,14 @@ from fastapi import APIRouter, HTTPException, Depends, Request, BackgroundTasks,
 from fastapi.responses import FileResponse
 from sqlmodel import Session, select
 from .database import engine
-from .models import User, OTPCode, UserSession, ImageStorage
+from .models import User, OTPCode, UserSession, ImageStorage, AnalysisHistory, Appointment, Notification, DeviceConnection, UserSettings
 from .image_storage import (
     save_uploaded_file_to_db, 
     save_base64_image_to_db, 
     get_image_from_database,
     delete_image_from_database,
-    get_user_profile_image
+    get_user_profile_image,
+    delete_user_cascade
 )
 from .schemas import (
     LoginRequest, LoginResponse, RegisterRequest, RegisterResponse,
@@ -1622,7 +1623,7 @@ async def delete_account(
         request_id = str(uuid.uuid4())
         client_info = get_client_info(request) if request else {}
         
-        # Delete user data from database
+        # Delete user data from database using cascade delete utility
         with Session(engine) as session:
             user = session.exec(
                 select(User).where(User.id == current_user.id)
@@ -1631,7 +1632,11 @@ async def delete_account(
             if not user:
                 raise HTTPException(status_code=404, detail="User not found")
             
-            # Delete profile image if exists
+            # Store user info for response before deletion
+            user_id = user.id
+            user_phone = user.phone
+            
+            # Delete legacy profile image file if exists
             if user.profile_image_url:
                 try:
                     if os.path.exists(user.profile_image_url):
@@ -1639,26 +1644,14 @@ async def delete_account(
                 except Exception as e:
                     logger.warning(f"Failed to delete profile image file: {e}")
             
-            # Delete user sessions
-            user_sessions = session.exec(
-                select(UserSession).where(UserSession.user_id == user.id)
-            ).all()
-            for session_record in user_sessions:
-                session.delete(session_record)
+            # Use cascade delete utility to safely delete user and all related records
+            success = delete_user_cascade(session, user.id)
             
-            # Delete OTP codes
-            otp_codes = session.exec(
-                select(OTPCode).where(OTPCode.phone == user.phone)
-            ).all()
-            for otp_code in otp_codes:
-                session.delete(otp_code)
-            
-            # Delete user
-            session.delete(user)
-            session.commit()
+            if not success:
+                raise HTTPException(status_code=500, detail="Failed to delete user account")
         
         # Audit logging
-        audit_log('account_deleted', user.phone, user.id, request_id, 
+        audit_log('account_deleted', user_phone, user_id, request_id, 
                  client_info.get('ip_address'), success=True)
         
         return DeleteAccountResponse(
@@ -1666,7 +1659,7 @@ async def delete_account(
             message="Account deleted successfully",
             data={
                 "deleted_at": datetime.utcnow().isoformat(),
-                "user_id": user.id
+                "user_id": user_id
             }
         )
         

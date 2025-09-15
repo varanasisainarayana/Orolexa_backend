@@ -222,3 +222,85 @@ def get_user_profile_image(session: Session, user_id: str) -> Optional[ImageStor
     except Exception as e:
         logger.error(f"Error getting user profile image: {e}")
         return None
+
+def delete_user_cascade(session: Session, user_id: str) -> bool:
+    """
+    Safely delete a user and all related records to avoid foreign key constraint violations
+    """
+    try:
+        from .models import AnalysisHistory, Appointment, Notification, DeviceConnection, UserSettings, UserSession, OTPCode
+        
+        # Get user first
+        user = session.exec(
+            select(User).where(User.id == user_id)
+        ).first()
+        
+        if not user:
+            return False
+        
+        # Delete all related records in proper order
+        
+        # 1. Delete profile image from database
+        if user.profile_image_id:
+            delete_image_from_database(session, user.profile_image_id)
+        
+        # 2. Delete analysis history
+        analysis_histories = session.exec(
+            select(AnalysisHistory).where(AnalysisHistory.user_id == user_id)
+        ).all()
+        for history in analysis_histories:
+            session.delete(history)
+        
+        # 3. Delete appointments
+        appointments = session.exec(
+            select(Appointment).where(Appointment.user_id == user_id)
+        ).all()
+        for appointment in appointments:
+            session.delete(appointment)
+        
+        # 4. Delete notifications
+        notifications = session.exec(
+            select(Notification).where(Notification.user_id == user_id)
+        ).all()
+        for notification in notifications:
+            session.delete(notification)
+        
+        # 5. Delete device connections
+        device_connections = session.exec(
+            select(DeviceConnection).where(DeviceConnection.user_id == user_id)
+        ).all()
+        for device_connection in device_connections:
+            session.delete(device_connection)
+        
+        # 6. Delete user settings
+        user_settings = session.exec(
+            select(UserSettings).where(UserSettings.user_id == user_id)
+        ).all()
+        for setting in user_settings:
+            session.delete(setting)
+        
+        # 7. Delete user sessions
+        user_sessions = session.exec(
+            select(UserSession).where(UserSession.user_id == user_id)
+        ).all()
+        for session_record in user_sessions:
+            session.delete(session_record)
+        
+        # 8. Delete OTP codes
+        otp_codes = session.exec(
+            select(OTPCode).where(OTPCode.phone == user.phone)
+        ).all()
+        for otp_code in otp_codes:
+            session.delete(otp_code)
+        
+        # 9. Finally delete the user
+        session.delete(user)
+        session.commit()
+        
+        logger.info(f"Successfully deleted user {user_id} and all related records")
+        return True
+        
+    except Exception as e:
+        logger.error(f"Error deleting user {user_id} and related records: {e}")
+        session.rollback()
+        return False
