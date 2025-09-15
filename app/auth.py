@@ -3,7 +3,14 @@ from fastapi import APIRouter, HTTPException, Depends, Request, BackgroundTasks,
 from fastapi.responses import FileResponse
 from sqlmodel import Session, select
 from .database import engine
-from .models import User, OTPCode, UserSession
+from .models import User, OTPCode, UserSession, ImageStorage
+from .image_storage import (
+    save_uploaded_file_to_db, 
+    save_base64_image_to_db, 
+    get_image_from_database,
+    delete_image_from_database,
+    get_user_profile_image
+)
 from .schemas import (
     LoginRequest, LoginResponse, RegisterRequest, RegisterResponse,
     VerifyOTPRequest, VerifyOTPResponse, ResendOTPRequest, ResendOTPResponse,
@@ -1176,16 +1183,25 @@ async def get_profile_image(user_id: str, current_user: User = Depends(get_curre
         if current_user.id != user_id:
             raise HTTPException(status_code=403, detail="Access denied")
         
-        # Get user from database
         with Session(engine) as session:
+            # Try to get image from database first
+            image_record = get_user_profile_image(session, user_id)
+            
+            if image_record:
+                # Return image from database
+                from fastapi.responses import Response
+                return Response(
+                    content=image_record.image_data,
+                    media_type=image_record.content_type,
+                    headers={"Cache-Control": "public, max-age=31536000"}
+                )
+            
+            # Fallback to legacy file system storage
             user = session.exec(
                 select(User).where(User.id == user_id)
             ).first()
             
-            if not user:
-                raise HTTPException(status_code=404, detail="User not found")
-            
-            if not user.profile_image_url:
+            if not user or not user.profile_image_url:
                 raise HTTPException(status_code=404, detail="Profile image not found")
             
             # Check if file exists
@@ -1198,7 +1214,7 @@ async def get_profile_image(user_id: str, current_user: User = Depends(get_curre
                 media_type="image/jpeg",
                 headers={"Cache-Control": "public, max-age=31536000"}  # Cache for 1 year
             )
-            
+        
     except HTTPException:
         raise
     except Exception as e:
@@ -1447,20 +1463,23 @@ async def upload_profile_image(
         request_id = str(uuid.uuid4())
         client_info = get_client_info(request) if request else {}
         
-        # Save profile image
-        profile_image_url = save_profile_image(payload.image, current_user.id)
-        
-        if not profile_image_url:
-            raise HTTPException(status_code=500, detail="Failed to save image")
-        
-        # Update user profile with new image URL
+        # Save profile image to database
         with Session(engine) as session:
+            profile_image_id = save_base64_image_to_db(session, payload.image, current_user.id, "profile")
+            
+            # Update user profile with new image ID
             user = session.exec(
                 select(User).where(User.id == current_user.id)
             ).first()
             
             if user:
-                user.profile_image_url = profile_image_url
+                # Delete old profile image if exists
+                if user.profile_image_id:
+                    delete_image_from_database(session, user.profile_image_id)
+                
+                user.profile_image_id = profile_image_id
+                # Keep legacy URL for backward compatibility
+                user.profile_image_url = f"/api/auth/profile/image/{current_user.id}"
                 user.updated_at = datetime.utcnow()
                 session.add(user)
                 session.commit()
@@ -1473,7 +1492,8 @@ async def upload_profile_image(
             success=True,
             message="Image uploaded successfully",
             data={
-                "image_url": profile_image_url
+                "image_url": f"/api/auth/profile/image/{current_user.id}",
+                "image_id": profile_image_id
             }
         )
         
@@ -1496,17 +1516,23 @@ async def upload_profile_file(
         request_id = str(uuid.uuid4())
         client_info = get_client_info(request) if request else {}
         
-        # Save uploaded file
-        profile_image_url = save_uploaded_file(file, current_user.id)
-        
-        # Update user profile with new image URL
+        # Save uploaded file to database
         with Session(engine) as session:
+            profile_image_id = save_uploaded_file_to_db(session, file, current_user.id, "profile")
+            
+            # Update user profile with new image ID
             user = session.exec(
                 select(User).where(User.id == current_user.id)
             ).first()
             
             if user:
-                user.profile_image_url = profile_image_url
+                # Delete old profile image if exists
+                if user.profile_image_id:
+                    delete_image_from_database(session, user.profile_image_id)
+                
+                user.profile_image_id = profile_image_id
+                # Keep legacy URL for backward compatibility
+                user.profile_image_url = f"/api/auth/profile/image/{current_user.id}"
                 user.updated_at = datetime.utcnow()
                 session.add(user)
                 session.commit()
@@ -1519,7 +1545,8 @@ async def upload_profile_file(
             success=True,
             message="Image uploaded successfully",
             data={
-                "image_url": profile_image_url
+                "image_url": f"/api/auth/profile/image/{current_user.id}",
+                "image_id": profile_image_id
             }
         )
         
@@ -1549,15 +1576,21 @@ async def delete_profile_image(
                 select(User).where(User.id == current_user.id)
             ).first()
             
-            if user and user.profile_image_url:
-                # Delete the actual file if it exists
-                try:
-                    if os.path.exists(user.profile_image_url):
-                        os.remove(user.profile_image_url)
-                except Exception as e:
-                    logger.warning(f"Failed to delete image file: {e}")
+            if user:
+                # Delete from database if exists
+                if user.profile_image_id:
+                    delete_image_from_database(session, user.profile_image_id)
+                
+                # Also clean up legacy file if exists
+                if user.profile_image_url:
+                    try:
+                        if os.path.exists(user.profile_image_url):
+                            os.remove(user.profile_image_url)
+                    except Exception as e:
+                        logger.warning(f"Failed to delete legacy image file: {e}")
                 
                 # Update user record
+                user.profile_image_id = None
                 user.profile_image_url = None
                 user.updated_at = datetime.utcnow()
                 session.add(user)
