@@ -1,5 +1,5 @@
 # app/auth.py
-from fastapi import APIRouter, HTTPException, Depends, Request, BackgroundTasks, UploadFile, File, Form
+from fastapi import APIRouter, HTTPException, Depends, Request, BackgroundTasks, UploadFile, File, Form, Response
 from fastapi.responses import FileResponse
 from sqlmodel import Session, select
 from .database import engine
@@ -908,7 +908,7 @@ async def register_send_otp_alias(payload: RegisterRequest):
     return await register(payload)
 
 @router.post("/verify-otp", response_model=VerifyOTPResponse)
-async def verify_otp(payload: VerifyOTPRequest):
+async def verify_otp(payload: VerifyOTPRequest, response: Response):
     """
     OTP Verification API - Verify OTP using Twilio Verify
     """
@@ -984,6 +984,20 @@ async def verify_otp(payload: VerifyOTPRequest):
             updated_at=user.updated_at
         )
         
+        # Set httpOnly cookie so browsers can load protected assets (e.g., images) without Authorization header
+        try:
+            response.set_cookie(
+                key="access_token",
+                value=access_token,
+                httponly=True,
+                secure=True,
+                samesite="Lax",
+                max_age=60 * 60
+            )
+        except Exception:
+            # Non-fatal: continue without cookie if setting fails
+            pass
+
         return VerifyOTPResponse(
             success=True,
             message="OTP verified successfully",
@@ -1175,6 +1189,7 @@ async def get_profile(current_user: User = Depends(get_current_user)):
         raise HTTPException(status_code=500, detail="Failed to fetch profile")
 
 @router.get("/profile/image/{user_id}")
+@router.head("/profile/image/{user_id}")
 async def get_profile_image(user_id: str, current_user: User = Depends(get_current_user)):
     """
     Get profile image for a user (only accessible by the user themselves)
