@@ -34,7 +34,7 @@ class User(SQLModel, table=True):
     notifications: List["Notification"] = Relationship(back_populates="user")
     device_connections: List["DeviceConnection"] = Relationship(back_populates="user")
     sessions: List["UserSession"] = Relationship(back_populates="user")
-    profile_image: Optional["ImageStorage"] = Relationship()
+    # profile_image: Optional["ImageStorage"] = Relationship()  # Removed to avoid foreign key ambiguity
 
 class OTPCode(SQLModel, table=True):
     __tablename__ = "otp_codes"
@@ -166,6 +166,6 @@ class ImageStorage(SQLModel, table=True):
     height: Optional[int] = None
     thumbnail_id: Optional[str] = Field(foreign_key="image_storage.id", default=None)  # Reference to thumbnail
     
-    # Relationships
-    user: Optional[User] = Relationship()
-    thumbnail: Optional["ImageStorage"] = Relationship()
+    # Relationships - removed to avoid foreign key ambiguity
+    # user: Optional[User] = Relationship()
+    # thumbnail: Optional["ImageStorage"] = Relationship()
