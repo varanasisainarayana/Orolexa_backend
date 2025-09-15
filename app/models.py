@@ -21,7 +21,7 @@ class User(SQLModel, table=True):
     age: Optional[int] = Field(default=None)
     date_of_birth: Optional[datetime] = Field(default=None)
     profile_image_url: Optional[str] = Field(max_length=255, default=None)  # Legacy field for backward compatibility
-    profile_image_id: Optional[str] = Field(foreign_key="image_storage.id", default=None)  # New database reference
+    profile_image_id: Optional[str] = Field(default=None)  # New database reference - foreign key added via migration
     email: Optional[str] = Field(max_length=100, default=None)
     is_verified: bool = Field(default=False)
     is_active: bool = Field(default=True)
