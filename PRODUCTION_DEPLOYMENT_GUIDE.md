@@ -528,6 +528,20 @@ docker run -v $(pwd):/zap/wrk/:rw -t owasp/zap2docker-stable zap-baseline.py \
   -J zap-report.json
 ```
 
+## 📋 Database Migrations (Alembic)
+
+Apply database migrations using Alembic either during deployment or on startup:
+
+```bash
+# During deployment (recommended)
+alembic upgrade head
+
+# Or enable on startup
+RUN_ALEMBIC_ON_STARTUP=true uvicorn app.main:app --host 0.0.0.0 --port 8000
+```
+
+Ensure your `DATABASE_URL` is configured correctly in the environment.
+
 ## 📋 Deployment Checklist
 
 ### Pre-Deployment
@@ -538,7 +552,7 @@ docker run -v $(pwd):/zap/wrk/:rw -t owasp/zap2docker-stable zap-baseline.py \
 - [ ] Monitoring configured
 - [ ] SSL certificates installed
 - [ ] Environment variables set
-- [ ] Database migrations applied
+- [ ] Database migrations applied (Alembic `upgrade head`)
 
 ### Deployment
 - [ ] Deploy to staging environment

@@ -9,7 +9,7 @@ A production-ready FastAPI backend for dental image analysis using Google's Gemi
 - **Image Processing**: Multi-image upload with automatic thumbnail generation
 - **Security**: JWT tokens, rate limiting, CORS protection
 - **Production Ready**: Docker containerization, health checks, logging
-- **Database**: SQLite with automatic migrations
+- **Database**: SQLite/PostgreSQL with Alembic migrations
 
 ## 📋 Prerequisites
 
@@ -45,7 +45,12 @@ A production-ready FastAPI backend for dental image analysis using Google's Gemi
    # Edit .env with your actual values
    ```
 
-5. **Run the application**
+5. **Run database migrations (Alembic)**
+```bash
+alembic upgrade head
+```
+
+6. **Run the application**
    ```bash
    python -m app.main
    ```
@@ -85,6 +90,20 @@ A production-ready FastAPI backend for dental image analysis using Google's Gemi
 | `BASE_URL` | Base URL for image serving | `http://localhost:8000` |
 | `ALLOWED_ORIGINS` | CORS allowed origins | `*` |
 | `DATABASE_URL` | Database connection string | `sqlite:///./app/orolexa.db` |
+
+### Database Migrations
+
+You can run Alembic on startup by setting an environment flag:
+
+```bash
+RUN_ALEMBIC_ON_STARTUP=true python -m app.main
+```
+
+Or manage migrations explicitly in CI/CD:
+
+```bash
+alembic upgrade head
+```
 
 ### Production Settings
 
