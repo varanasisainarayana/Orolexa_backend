@@ -22,7 +22,7 @@ import time as _time
 # Load environment variables as early as possible
 load_dotenv()
 
-from . import auth
+from .routers import auth_router
 from .database import create_db_and_tables, get_session
 from .config import (
     ESP32_MAX_IMAGE_SIZE,
@@ -63,9 +63,15 @@ async def lifespan(app: FastAPI):
     try:
         create_db_and_tables()
         
-        # Run database migrations
-        from .migrations import run_migrations
-        run_migrations()
+        # Optional: run Alembic upgrade if enabled
+        if os.getenv("RUN_ALEMBIC_ON_STARTUP", "false").lower() in ("1", "true", "yes"): 
+            try:
+                import subprocess, sys
+                logger.info("Running Alembic upgrade on startup...")
+                subprocess.run([sys.executable, "-m", "alembic", "upgrade", "head"], check=True)
+                logger.info("Alembic upgrade completed")
+            except Exception as _e:
+                logger.exception("Alembic upgrade failed")
         
         logger.info("Database initialized successfully")
     except Exception as e:
@@ -162,24 +168,24 @@ def esp32_rate_limit(request: Request, current_user: int = Depends(get_current_u
     return int(current_user) if current_user is not None else 0
 
 # Include authentication router
-app.include_router(auth.router)
+app.include_router(auth_router.router)
 
 # Include all routers
-from . import analysis
-from . import doctors
-from . import appointments
-from . import notifications
-from . import devices
-from . import health_analytics
-from . import settings as settings_router
+from .routers import analysis_router
+from .routers import doctors_router
+from .routers import appointments_router
+from .routers import notifications_router
+from .routers import devices_router
+from .routers import health_analytics_router
+from .routers import settings_router
 # Streaming removed - implemented in frontend
 
-app.include_router(analysis.router)
-app.include_router(doctors.router)
-app.include_router(appointments.router)
-app.include_router(notifications.router)
-app.include_router(devices.router)
-app.include_router(health_analytics.router)
+app.include_router(analysis_router.router)
+app.include_router(doctors_router.router)
+app.include_router(appointments_router.router)
+app.include_router(notifications_router.router)
+app.include_router(devices_router.router)
+app.include_router(health_analytics_router.router)
 app.include_router(settings_router.router)
 
 # Health check endpoint

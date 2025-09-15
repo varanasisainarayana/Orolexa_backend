@@ -190,7 +190,19 @@ def delete_image_from_database(session: Session, image_id: str) -> bool:
         if not image_record:
             return False
         
-        # Delete thumbnail if exists
+        # Null any user references to this image to avoid FK constraints
+        try:
+            user = session.exec(
+                select(User).where(User.profile_image_id == image_id)
+            ).first()
+            if user:
+                user.profile_image_id = None
+                session.add(user)
+                session.commit()
+        except Exception:
+            session.rollback()
+        
+        # Delete thumbnail if exists (after nullifying references)
         if image_record.thumbnail_id:
             delete_image_from_database(session, image_record.thumbnail_id)
         

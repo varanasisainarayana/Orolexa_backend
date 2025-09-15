@@ -7,7 +7,7 @@ from typing import Optional, List
 from functools import lru_cache
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", case_sensitive=False)
+    model_config = SettingsConfigDict(env_file=".env", case_sensitive=False, extra='forbid')
     # Application Settings
     APP_NAME: str = "Dental AI API"
     APP_VERSION: str = "1.0.0"
@@ -56,6 +56,7 @@ class Settings(BaseSettings):
     
     # Rate Limiting
     RATE_LIMIT_PER_MINUTE: int = 60
+    REDIS_URL: Optional[str] = os.environ.get("REDIS_URL", None)
     
     # Health Check
     HEALTH_CHECK_ENABLED: bool = True
@@ -100,9 +101,6 @@ def get_settings() -> Settings:
     return s
 
 settings: Settings = get_settings()
-
-# Database
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./orolexa.db")
 
 # ESP32 limits
 ESP32_MAX_IMAGE_SIZE = int(os.getenv("ESP32_MAX_IMAGE_SIZE", str(10 * 1024 * 1024)))  # 10MB
