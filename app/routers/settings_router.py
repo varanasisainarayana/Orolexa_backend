@@ -4,10 +4,11 @@ import logging
 import json
 from datetime import datetime
 
-from ..persistence.database import get_session
-from ..models import UserSettings, User
-from ..models.schemas import AppSettings, UpdateSettingsRequest
-from ..utils import decode_jwt_token
+from ..db.session import get_session
+from ..db.models.users.settings import UserSettings
+from ..db.models.users.user import User
+from ..schemas.settings.settings import AppSettings, UpdateSettingsRequest
+from ..services.auth import decode_jwt_token
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 
 logger = logging.getLogger(__name__)
