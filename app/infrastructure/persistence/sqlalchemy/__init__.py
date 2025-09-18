@@ -1,3 +1,0 @@
-"""SQLAlchemy-based persistence implementations."""
-
-

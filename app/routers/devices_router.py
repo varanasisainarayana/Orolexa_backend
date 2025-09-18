@@ -4,10 +4,11 @@ from sqlmodel import Session, select
 import logging
 from datetime import datetime
 
-from ..persistence.database import get_session
-from ..models import DeviceConnection, User
-from ..models.schemas import DeviceConnectionCreate, DeviceConnectionResponse, DeviceStatus
-from ..utils import decode_jwt_token
+from ..db.session import get_session
+from ..db.models.health.device import DeviceConnection
+from ..db.models.users.user import User
+from ..schemas.devices.device import DeviceConnectionCreate, DeviceConnectionResponse, DeviceStatus
+from ..services.auth import decode_jwt_token
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 
 logger = logging.getLogger(__name__)

@@ -4,10 +4,11 @@ from sqlmodel import Session, select
 import logging
 import json
 
-from ..persistence.database import get_session
-from ..models import Notification, User
-from ..models.schemas import NotificationCreate, NotificationResponse, NotificationFilters
-from ..utils import decode_jwt_token
+from ..db.session import get_session
+from ..db.models.health.notification import Notification
+from ..db.models.users.user import User
+from ..schemas.notifications.notification import NotificationCreate, NotificationResponse, NotificationFilters
+from ..services.auth import decode_jwt_token
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 
 logger = logging.getLogger(__name__)
