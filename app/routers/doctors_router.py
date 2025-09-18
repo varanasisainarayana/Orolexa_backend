@@ -3,10 +3,11 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlmodel import Session, select
 import logging
 
-from ..persistence.database import get_session
-from ..models import Doctor, User
-from ..models.schemas import DoctorCreate, DoctorResponse, DoctorFilters
-from ..utils import decode_jwt_token
+from ..db.session import get_session
+from ..db.models.health.doctor import Doctor
+from ..db.models.users.user import User
+from ..schemas.doctors.doctor import DoctorCreate, DoctorResponse, DoctorFilters
+from ..services.auth import decode_jwt_token
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 
 logger = logging.getLogger(__name__)
